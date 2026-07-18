@@ -301,9 +301,10 @@ func configurePlugin(raw []byte) error {
 	globalWorker.StateSync = func(authID string, fsm *AccountFSM) {
 		pluginStateMu.Lock()
 		globalState.Accounts[authID] = AccountRuntime{
-			AuthID:   authID,
-			State:    fsm.State(),
-			NextWake: fsm.NextWake(),
+			AuthID:       authID,
+			State:        fsm.State(),
+			NextWake:     fsm.NextWake(),
+			LastSnapshot: fsm.LastSnapshot(),
 		}
 		pluginStateMu.Unlock()
 		// Debounced persist. saveState is cheap (small JSON, atomic rename) but
@@ -339,9 +340,10 @@ func restartWorkerFromState() {
 	w.StateSync = func(authID string, fsm *AccountFSM) {
 		pluginStateMu.Lock()
 		globalState.Accounts[authID] = AccountRuntime{
-			AuthID:   authID,
-			State:    fsm.State(),
-			NextWake: fsm.NextWake(),
+			AuthID:       authID,
+			State:        fsm.State(),
+			NextWake:     fsm.NextWake(),
+			LastSnapshot: fsm.LastSnapshot(),
 		}
 		pluginStateMu.Unlock()
 		debouncedSaveState(defaultStatePath())

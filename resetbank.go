@@ -39,6 +39,11 @@ type AccountFSM struct {
 	attempt   ResetAttempt
 	nextWake  time.Time
 	verifyDue time.Time
+	// lastSnapshot is the most recent Snapshot observed by any state step
+	// (IDLE patrol, CONFIRMING pre-reset, VERIFYING post-reset). The worker
+	// mirrors it into AccountRuntime so the management UI can show live
+	// credit counts, weekly %, and next expiry without an extra API call.
+	lastSnapshot Snapshot
 }
 
 // NewAccountFSM builds an FSM in StateIDLE, ready for its first Step().
@@ -61,6 +66,14 @@ func (f *AccountFSM) NextWake() time.Time {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.nextWake
+}
+
+// LastSnapshot returns the most recent Snapshot observed by any state step.
+// Thread-safe.
+func (f *AccountFSM) LastSnapshot() Snapshot {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastSnapshot
 }
 
 // SetNextWake lets external callers (worker's TriggerCheck) override the
@@ -135,6 +148,7 @@ func (f *AccountFSM) stepIDLE() time.Time {
 		f.log("warn", fmt.Sprintf("list failed: %v", err), "retry patrol", &next, nil)
 		return next
 	}
+	f.lastSnapshot = snap // mirror into the UI-facing snapshot
 	avail := availableCreditsSorted(snap.Credits, now)
 	if len(avail) == 0 {
 		next := now.Add(f.Cfg.RefreshInterval)

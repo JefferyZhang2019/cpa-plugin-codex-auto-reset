@@ -427,6 +427,8 @@ func renderStatusHTML(state *PluginState) string {
         checkAll: "Check all",
         reset: "Reset now",
         creditsAvail: "Credits available",
+        weeklyRemain: "Weekly remaining",
+        nextExpiry: "Next credit expiry",
         nextState: "Next",
         lastCycle: "Last cycle",
         noAccounts: "No accounts enabled.",
@@ -452,6 +454,8 @@ func renderStatusHTML(state *PluginState) string {
         checkAll: "\u68c0\u67e5\u5168\u90e8",
         reset: "\u7acb\u5373\u91cd\u7f6e",
         creditsAvail: "\u53ef\u7528\u91cd\u7f6e\u6b21\u6570",
+        weeklyRemain: "\u5468\u989d\u5ea6\u5269\u4f59",
+        nextExpiry: "\u4e0b\u4e00\u4e2a\u4fe1\u7528\u989d\u5ea6\u8fc7\u671f",
         nextState: "\u4e0b\u4e00\u8f6e",
         lastCycle: "\u4e0a\u4e00\u8f6e",
         noAccounts: "\u672a\u542f\u7528\u4efb\u4f55\u8d26\u53f7\u3002",
@@ -521,14 +525,29 @@ func renderStatusHTML(state *PluginState) string {
       box.innerHTML = ids.sort().map(function (id) {
         const a = accts[id] || {};
         const state = a.state || 'IDLE';
-        const snap = (a.attempt && a.attempt.pre_snapshot) || {};
+        // Prefer last_snapshot (set on every IDLE patrol); fall back to
+        // attempt.pre_snapshot during an active reset cycle.
+        const snap = a.last_snapshot || (a.attempt && a.attempt.pre_snapshot) || {};
         const credits = snap.available_count == null ? '-' : snap.available_count;
+        const weekly = snap.weekly_pct == null || snap.weekly_pct < 0 ? '-' : snap.weekly_pct + '%';
         const nextAt = a.next_wake || '';
+        // Find the soonest-expiring credit from the snapshot for display.
+        let nextExpiry = '';
+        if (snap.credits && snap.credits.length > 0) {
+          const soonest = snap.credits
+            .filter(function (c) { return c.expires_at; })
+            .sort(function (x, y) { return x.expires_at.localeCompare(y.expires_at); })[0];
+          if (soonest) {
+            nextExpiry = fmtTime(soonest.expires_at);
+          }
+        }
         return '<div class="card">' +
           '<div class="card-head"><span class="auth-id">' + escapeHTML(id) + '</span>' +
           '<span class="state-badge ' + escapeHTML(state) + '">' + escapeHTML(state) + '</span></div>' +
           '<div class="kv">' +
-          '<span class="k">' + escapeHTML(t('creditsAvail')) + '</span><span>' + escapeHTML(credits) + '</span>' +
+          '<span class="k">' + escapeHTML(t('creditsAvail')) + '</span><span>' + escapeHTML(String(credits)) + '</span>' +
+          '<span class="k">' + escapeHTML(t('weeklyRemain')) + '</span><span>' + escapeHTML(weekly) + '</span>' +
+          (nextExpiry ? '<span class="k">' + escapeHTML(t('nextExpiry')) + '</span><span>' + escapeHTML(nextExpiry) + '</span>' : '') +
           '<span class="k">' + escapeHTML(t('nextState')) + '</span><span class="next" data-next="' + escapeHTML(nextAt) + '">' + escapeHTML(fmtTime(nextAt)) + ' <span class="countdown"></span></span>' +
           '</div>' +
           '<div class="actions" style="margin-top:8px;">' +
@@ -574,10 +593,20 @@ func renderStatusHTML(state *PluginState) string {
       }
       box.innerHTML = accts.map(function (a) {
         var checked = a.enabled ? ' checked' : '';
-        // Show the full file name (most informative: codex-teamID-email-team)
-        // as the primary label; show the ChatGPT account ID as secondary detail.
-        var primary = escapeHTML(a.name || a.label || a.auth_index);
-        var detail = a.account ? ' <span class="muted" style="font-size:11px;">(' + escapeHTML(a.account) + ')</span>' : '';
+        // Build the most informative label available. Prefer the full file
+        // Name; if empty (some CPA builds don't populate it), show email plus
+        // the short auth_index so duplicate emails are distinguishable.
+        var primary, detail;
+        if (a.name) {
+          primary = escapeHTML(a.name);
+          detail = a.account ? ' <span class="muted" style="font-size:11px;">(' + escapeHTML(a.account) + ')</span>' : '';
+        } else {
+          primary = escapeHTML(a.email || a.label || a.auth_index);
+          // Always show the auth_index short form so accounts with the same
+          // email are distinguishable in the checkbox list.
+          var shortIdx = a.auth_index ? a.auth_index.substring(0, 12) : '';
+          detail = ' <span class="muted" style="font-size:11px;">[' + escapeHTML(shortIdx) + '…]</span>';
+        }
         return '<label style="display:flex; align-items:center; gap:8px; font-size:13px; font-weight:500;">' +
                '<input type="checkbox" class="acct-checkbox" value="' + escapeHTML(a.auth_index) + '"' + checked + ' style="width:auto; margin:0;">' +
                '<span>' + primary + detail + '</span></label>';

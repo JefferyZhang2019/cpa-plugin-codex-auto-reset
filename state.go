@@ -18,10 +18,11 @@ type PluginState struct {
 // AccountRuntime is the persisted per-account FSM snapshot. Only the fields
 // needed to resume scheduling are stored; transient step state is not.
 type AccountRuntime struct {
-	AuthID   string       `json:"auth_id"`
-	State    State        `json:"state"`
-	NextWake time.Time    `json:"next_wake"`
-	Attempt  ResetAttempt `json:"attempt,omitempty"`
+	AuthID       string       `json:"auth_id"`
+	State        State        `json:"state"`
+	NextWake     time.Time    `json:"next_wake"`
+	Attempt      ResetAttempt `json:"attempt,omitempty"`
+	LastSnapshot Snapshot     `json:"last_snapshot,omitempty"`
 }
 
 // saveState writes state atomically: marshal → write to <path>.tmp → rename.

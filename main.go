@@ -341,14 +341,14 @@ func managementRegistrationResponse() pluginapi.ManagementRegistrationResponse {
 		Description: "Auto-redeem Codex Reset Bank credits before they expire.",
 	}}
 	routes := []pluginapi.ManagementRoute{
-		{Method: http.MethodGet, Path: "/codex-auto-reset/status"},
-		{Method: http.MethodGet, Path: "/codex-auto-reset/logs"},
-		{Method: http.MethodPut, Path: "/codex-auto-reset/settings"},
-		{Method: http.MethodPost, Path: "/codex-auto-reset/check"},
-		{Method: http.MethodPost, Path: "/codex-auto-reset/check/all"},
-		{Method: http.MethodPost, Path: "/codex-auto-reset/reset"},
-		{Method: http.MethodGet, Path: "/codex-auto-reset/export"},
-		{Method: http.MethodPost, Path: "/codex-auto-reset/import"},
+		{Method: http.MethodGet, Path: "/plugins/codex-auto-reset/status"},
+		{Method: http.MethodGet, Path: "/plugins/codex-auto-reset/logs"},
+		{Method: http.MethodPut, Path: "/plugins/codex-auto-reset/settings"},
+		{Method: http.MethodPost, Path: "/plugins/codex-auto-reset/check"},
+		{Method: http.MethodPost, Path: "/plugins/codex-auto-reset/check/all"},
+		{Method: http.MethodPost, Path: "/plugins/codex-auto-reset/reset"},
+		{Method: http.MethodGet, Path: "/plugins/codex-auto-reset/export"},
+		{Method: http.MethodPost, Path: "/plugins/codex-auto-reset/import"},
 	}
 	return pluginapi.ManagementRegistrationResponse{Routes: routes, Resources: resources}
 }

@@ -35,18 +35,22 @@ func TestParseResetCreditsResponse_UpstreamContractFixture(t *testing.T) {
 }
 
 func TestParseUsageResponse_WeeklyPercent(t *testing.T) {
+	// Real /wham/usage shape (verified against codex-quota-scheduler): the
+	// weekly window is code_review_rate_limit.secondary_window, not a flat
+	// rate_limits[] array. used_percent 15 -> remaining 85.
 	raw := []byte(`{
 	  "plan_type":"plus",
 	  "rate_limit_reset_credits":{"available_count":1},
-	  "rate_limits":[
-	    {"kind":"weekly","window_seconds":604800,"used_percent":15,"reset_at":"2026-07-25T00:00:00Z"}
-	  ]
+	  "code_review_rate_limit":{
+	    "primary_window":{"used_percent":42,"limit_window_seconds":18000},
+	    "secondary_window":{"used_percent":15,"limit_window_seconds":604800}
+	  }
 	}`)
 	snap, err := parseUsageResponse(raw, time.Now())
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	// weekly used 15% => remaining 85
+	// weekly (secondary) used 15% => remaining 85
 	if snap.WeeklyPct != 85 {
 		t.Fatalf("WeeklyPct = %d, want 85", snap.WeeklyPct)
 	}
@@ -55,15 +59,61 @@ func TestParseUsageResponse_WeeklyPercent(t *testing.T) {
 	}
 }
 
-func TestParseUsageResponse_NoWeeklyWindowDefaultsFull(t *testing.T) {
-	// No weekly window in rate_limits -> treat as full (100%).
-	raw := []byte(`{"plan_type":"plus","rate_limits":[]}`)
+func TestParseUsageResponse_NoSecondaryWindowDefaultsFull(t *testing.T) {
+	// No secondary_window (e.g. freshly-reset account) -> treat as full (100%).
+	// Must NOT misread primary_window's used_percent as the weekly value.
+	raw := []byte(`{
+	  "plan_type":"plus",
+	  "code_review_rate_limit":{
+	    "primary_window":{"used_percent":99,"limit_window_seconds":18000}
+	  }
+	}`)
 	snap, err := parseUsageResponse(raw, time.Now())
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 	if snap.WeeklyPct != 100 {
-		t.Fatalf("WeeklyPct = %d, want 100 when no weekly window", snap.WeeklyPct)
+		t.Fatalf("WeeklyPct = %d, want 100 when no secondary window (got primary bleed?)", snap.WeeklyPct)
+	}
+}
+
+func TestParseUsageResponse_NoCodeReviewRateLimitDefaultsFull(t *testing.T) {
+	raw := []byte(`{"plan_type":"plus"}`)
+	snap, err := parseUsageResponse(raw, time.Now())
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if snap.WeeklyPct != 100 {
+		t.Fatalf("WeeklyPct = %d, want 100 when no rate-limit block", snap.WeeklyPct)
+	}
+}
+
+func TestParseUsageResponse_OverageClampsToZero(t *testing.T) {
+	// used_percent > 100 (server-side overage) must clamp remaining to 0, not go negative.
+	raw := []byte(`{
+	  "code_review_rate_limit":{
+	    "secondary_window":{"used_percent":150,"limit_window_seconds":604800}
+	  }
+	}`)
+	snap, err := parseUsageResponse(raw, time.Now())
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if snap.WeeklyPct != 0 {
+		t.Fatalf("WeeklyPct = %d, want 0 (clamped)", snap.WeeklyPct)
+	}
+}
+
+func TestParseMalformedJSON_AllParsersReturnError(t *testing.T) {
+	garbage := []byte(`{not valid json`)
+	if _, err := parseResetCreditsResponse(garbage, time.Now()); err == nil {
+		t.Fatalf("parseResetCreditsResponse: expected error on malformed JSON")
+	}
+	if _, err := parseUsageResponse(garbage, time.Now()); err == nil {
+		t.Fatalf("parseUsageResponse: expected error on malformed JSON")
+	}
+	if _, err := parseConsumeResponse(garbage); err == nil {
+		t.Fatalf("parseConsumeResponse: expected error on malformed JSON")
 	}
 }
 

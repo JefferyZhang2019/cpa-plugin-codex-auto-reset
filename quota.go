@@ -67,14 +67,26 @@ func parseResetCreditsResponse(raw []byte, now time.Time) (Snapshot, error) {
 	}, nil
 }
 
-type rateLimitWindow struct {
-	Kind          string  `json:"kind"`
-	UsedPercent   float64 `json:"used_percent"`
-	WindowSeconds int64   `json:"window_seconds"`
+// usageWindow is one of the primary/secondary windows under
+// code_review_rate_limit. The wire shape (verified against the sibling
+// codex-quota-scheduler, which parses live /wham/usage responses) is:
+//   /wham/usage.code_review_rate_limit.{
+//      "primary_window":   {...},   // 5-hour rolling window (~18000s)
+//      "secondary_window": {...}    // weekly window (~604800s)
+//   }
+// We only consume used_percent from the secondary (weekly) window.
+type usageWindow struct {
+	UsedPercent        float64 `json:"used_percent"`
+	LimitWindowSeconds int64   `json:"limit_window_seconds"`
+}
+
+type codeReviewRateLimit struct {
+	PrimaryWindow   *usageWindow `json:"primary_window,omitempty"`
+	SecondaryWindow *usageWindow `json:"secondary_window,omitempty"`
 }
 
 type usageBody struct {
-	RateLimits []rateLimitWindow `json:"rate_limits"`
+	CodeReviewRateLimit *codeReviewRateLimit `json:"code_review_rate_limit,omitempty"`
 	// rate_limit_reset_credits is a summary form present on /wham/usage; the
 	// detailed credit list comes from /wham/rate-limit-reset-credits instead.
 	ResetCreditsSummary struct {
@@ -83,22 +95,22 @@ type usageBody struct {
 }
 
 // parseUsageResponse parses GET /wham/usage. WeeklyPct is the REMAINING weekly
-// quota (100 - used_percent), rounded. If no weekly window is present the
-// account is treated as full (100%).
+// quota (100 − secondary_window.used_percent), round-half-up, clamped to ≥0.
+// If no secondary window is present the account is treated as full (100%) —
+// this also covers freshly-reset accounts whose server has not yet populated
+// the window. WeeklyPct is a DISPLAY value only; no decision threshold depends
+// on its exact rounding.
 func parseUsageResponse(raw []byte, now time.Time) (Snapshot, error) {
 	var body usageBody
 	if err := json.Unmarshal(raw, &body); err != nil {
 		return Snapshot{}, fmt.Errorf("parse usage response: %w", err)
 	}
 	weeklyPct := 100
-	for _, w := range body.RateLimits {
-		if w.Kind == "weekly" {
-			used := int(w.UsedPercent + 0.5)
-			weeklyPct = 100 - used
-			if weeklyPct < 0 {
-				weeklyPct = 0
-			}
-			break
+	if body.CodeReviewRateLimit != nil && body.CodeReviewRateLimit.SecondaryWindow != nil {
+		used := int(body.CodeReviewRateLimit.SecondaryWindow.UsedPercent + 0.5)
+		weeklyPct = 100 - used
+		if weeklyPct < 0 {
+			weeklyPct = 0
 		}
 	}
 	return Snapshot{

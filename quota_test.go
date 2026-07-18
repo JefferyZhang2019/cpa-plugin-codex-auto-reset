@@ -104,6 +104,47 @@ func TestParseUsageResponse_OverageClampsToZero(t *testing.T) {
 	}
 }
 
+func TestParseUsageResponse_TopLevelRateLimitPath(t *testing.T) {
+	// Some CPA builds put the rate-limit windows under the top-level
+	// "rate_limit" key (not "code_review_rate_limit"). The parser must find
+	// the weekly % from either path.
+	raw := []byte(`{
+	  "plan_type":"plus",
+	  "rate_limit_reset_credits":{"available_count":2},
+	  "rate_limit":{
+	    "primary_window":{"used_percent":50,"limit_window_seconds":18000},
+	    "secondary_window":{"used_percent":81,"limit_window_seconds":604800}
+	  }
+	}`)
+	snap, err := parseUsageResponse(raw, time.Now())
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	// used 81% -> remaining 19%
+	if snap.WeeklyPct != 19 {
+		t.Fatalf("WeeklyPct = %d, want 19", snap.WeeklyPct)
+	}
+	if snap.AvailableCount != 2 {
+		t.Fatalf("available_count = %d", snap.AvailableCount)
+	}
+}
+
+func TestParseUsageResponse_CamelCaseFallback(t *testing.T) {
+	// camelCase variant of field names.
+	raw := []byte(`{
+	  "rateLimit":{
+	    "secondaryWindow":{"usedPercent":30}
+	  }
+	}`)
+	snap, err := parseUsageResponse(raw, time.Now())
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if snap.WeeklyPct != 70 {
+		t.Fatalf("WeeklyPct = %d, want 70", snap.WeeklyPct)
+	}
+}
+
 func TestParseMalformedJSON_AllParsersReturnError(t *testing.T) {
 	garbage := []byte(`{not valid json`)
 	if _, err := parseResetCreditsResponse(garbage, time.Now()); err == nil {

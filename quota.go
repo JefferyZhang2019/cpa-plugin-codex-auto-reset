@@ -67,57 +67,99 @@ func parseResetCreditsResponse(raw []byte, now time.Time) (Snapshot, error) {
 	}, nil
 }
 
-// usageWindow is one of the primary/secondary windows under
-// code_review_rate_limit. The wire shape (verified against the sibling
-// codex-quota-scheduler, which parses live /wham/usage responses) is:
-//   /wham/usage.code_review_rate_limit.{
-//      "primary_window":   {...},   // 5-hour rolling window (~18000s)
-//      "secondary_window": {...}    // weekly window (~604800s)
-//   }
-// We only consume used_percent from the secondary (weekly) window.
-type usageWindow struct {
-	UsedPercent        float64 `json:"used_percent"`
-	LimitWindowSeconds int64   `json:"limit_window_seconds"`
-}
-
-type codeReviewRateLimit struct {
-	PrimaryWindow   *usageWindow `json:"primary_window,omitempty"`
-	SecondaryWindow *usageWindow `json:"secondary_window,omitempty"`
-}
-
-type usageBody struct {
-	CodeReviewRateLimit *codeReviewRateLimit `json:"code_review_rate_limit,omitempty"`
-	// rate_limit_reset_credits is a summary form present on /wham/usage; the
-	// detailed credit list comes from /wham/rate-limit-reset-credits instead.
-	ResetCreditsSummary struct {
-		AvailableCount int `json:"available_count"`
-	} `json:"rate_limit_reset_credits"`
-}
-
-// parseUsageResponse parses GET /wham/usage. WeeklyPct is the REMAINING weekly
-// quota (100 − secondary_window.used_percent), round-half-up, clamped to ≥0.
-// If no secondary window is present the account is treated as full (100%) —
-// this also covers freshly-reset accounts whose server has not yet populated
-// the window. WeeklyPct is a DISPLAY value only; no decision threshold depends
-// on its exact rounding.
+// parseUsageResponse parses GET /wham/usage using flexible map lookups (same
+// approach as the sibling codex-quota-scheduler). The rate-limit windows may
+// appear under either code_review_rate_limit or rate_limit (top-level); both
+// have primary_window (5-hour) and secondary_window (weekly). We check both
+// paths and take the first secondary_window that reports a real used_percent.
+//
+// WeeklyPct is the REMAINING weekly quota (100 − used_percent), rounded.
+// If no secondary window is found, defaults to 100% (freshly reset or no data).
 func parseUsageResponse(raw []byte, now time.Time) (Snapshot, error) {
-	var body usageBody
-	if err := json.Unmarshal(raw, &body); err != nil {
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
 		return Snapshot{}, fmt.Errorf("parse usage response: %w", err)
 	}
+
+	availableCount := 0
+	if credits, ok := getMapAny(doc, "rate_limit_reset_credits", "rateLimitResetCredits"); ok {
+		if c, ok := getIntAny(credits, "available_count", "availableCount"); ok {
+			availableCount = c
+		}
+	}
+
+	weeklyUsed := -1.0 // sentinel: not found
+	// Check both paths for rate-limit windows, like the scheduler does.
+	for _, key := range []string{"code_review_rate_limit", "codeReviewRateLimit", "rate_limit", "rateLimit"} {
+		rl, ok := getMapAny(doc, key)
+		if !ok {
+			continue
+		}
+		// Try secondary_window (weekly) — both snake_case and camelCase.
+		for _, swKey := range []string{"secondary_window", "secondaryWindow"} {
+			if sw, ok := getMapAny(rl, swKey); ok {
+				if used, ok := getFloatAny(sw, "used_percent", "usedPercent"); ok {
+					weeklyUsed = used
+					break
+				}
+			}
+		}
+		if weeklyUsed >= 0 {
+			break
+		}
+	}
+
 	weeklyPct := 100
-	if body.CodeReviewRateLimit != nil && body.CodeReviewRateLimit.SecondaryWindow != nil {
-		used := int(body.CodeReviewRateLimit.SecondaryWindow.UsedPercent + 0.5)
-		weeklyPct = 100 - used
+	if weeklyUsed >= 0 {
+		weeklyPct = 100 - int(weeklyUsed+0.5)
 		if weeklyPct < 0 {
 			weeklyPct = 0
 		}
 	}
+
 	return Snapshot{
-		AvailableCount: body.ResetCreditsSummary.AvailableCount,
+		AvailableCount: availableCount,
 		WeeklyPct:      weeklyPct,
 		CapturedAt:     now,
 	}, nil
+}
+
+// --- flexible map helpers (mirror codex-quota-scheduler's getMap/getInt/getFloat64) ---
+
+func getMapAny(root map[string]any, keys ...string) (map[string]any, bool) {
+	for _, key := range keys {
+		if v, ok := root[key]; ok {
+			if m, ok := v.(map[string]any); ok {
+				return m, true
+			}
+		}
+	}
+	return nil, false
+}
+
+func getIntAny(root map[string]any, keys ...string) (int, bool) {
+	for _, key := range keys {
+		if v, ok := root[key]; ok {
+			switch n := v.(type) {
+			case float64:
+				return int(n), true
+			case int:
+				return n, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func getFloatAny(root map[string]any, keys ...string) (float64, bool) {
+	for _, key := range keys {
+		if v, ok := root[key]; ok {
+			if n, ok := v.(float64); ok {
+				return n, true
+			}
+		}
+	}
+	return 0, false
 }
 
 // parseConsumeResponse parses POST /rate-limit-reset-credits/consume.

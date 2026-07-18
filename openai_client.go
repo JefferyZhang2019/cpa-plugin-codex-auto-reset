@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,6 +20,33 @@ type OpenAIClient struct {
 
 const defaultBaseURL = "https://chatgpt.com"
 
+// openAIDefaultHTTP is the fallback client used when OpenAIClient.HTTP is nil.
+// A finite Timeout is mandatory: the worker goroutine drives one FSM per
+// account synchronously, so a hung TCP connection against chatgpt.com would
+// otherwise park that account permanently (spec §3.3, §6.1).
+var openAIDefaultHTTP = &http.Client{Timeout: 30 * time.Second}
+
+// HTTPStatusError carries the status code of a non-2xx response so callers
+// (notably the retry classifier in retry.go) can distinguish 4xx (hard stop)
+// from 5xx (retry). Body is included for diagnostics/logging.
+type HTTPStatusError struct {
+	Method string
+	Path   string
+	Code   int
+	Body   []byte
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("openai %s %s: status %d", e.Method, e.Path, e.Code)
+}
+
+// IsClientError reports whether err is a 4xx HTTPStatusError (bad request,
+// bad token, etc.) — such errors should NOT be retried.
+func IsClientError(err error) bool {
+	var se *HTTPStatusError
+	return errors.As(err, &se) && se.Code >= 400 && se.Code < 500
+}
+
 func (c *OpenAIClient) baseURL() string {
 	if c.BaseURL != "" {
 		return c.BaseURL
@@ -30,7 +58,7 @@ func (c *OpenAIClient) httpClient() *http.Client {
 	if c.HTTP != nil {
 		return c.HTTP
 	}
-	return http.DefaultClient
+	return openAIDefaultHTTP
 }
 
 func (c *OpenAIClient) do(req *http.Request) ([]byte, error) {
@@ -39,12 +67,19 @@ func (c *OpenAIClient) do(req *http.Request) ([]byte, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	// 1 MiB cap; the largest legitimate response from these endpoints is well
+	// under 2 KiB. A larger body signals a buggy or hostile server.
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return body, fmt.Errorf("openai %s %s: status %d", req.Method, req.URL.Path, resp.StatusCode)
+		return body, &HTTPStatusError{
+			Method: req.Method,
+			Path:   req.URL.Path,
+			Code:   resp.StatusCode,
+			Body:   body,
+		}
 	}
 	return body, nil
 }
@@ -93,8 +128,17 @@ func (c *OpenAIClient) GetUsage(creds CodexCredentials) (Snapshot, error) {
 // the TARGETED form (spec §2.1): body always carries both redeem_request_id
 // AND credit_id. The credit_id points at the specific soonest-expiring credit,
 // so OpenAI cannot auto-consume a later one. The body has EXACTLY these two
-// fields — never more, never fewer.
+// fields — the payload struct below has two non-omitempty fields, so
+// json.Marshal cannot add or drop either.
+//
+// Both arguments MUST be non-empty: an empty credit_id silently degrades to
+// OpenAI's auto-pick form (defeating the safety mechanism), and an empty
+// redeem_request_id defeats server-side idempotency dedup. Validate before
+// calling.
 func (c *OpenAIClient) Consume(creds CodexCredentials, redeemRequestID, creditID string) (ConsumeResponse, error) {
+	if redeemRequestID == "" || creditID == "" {
+		return ConsumeResponse{}, errors.New("consume: redeem_request_id and credit_id are both required (empty defeats §2.1 safety)")
+	}
 	u := c.baseURL() + consumeEndpointPath
 	payload := struct {
 		RedeemRequestID string `json:"redeem_request_id"`

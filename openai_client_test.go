@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -113,6 +114,54 @@ func TestConsume_HTTPErrorStatus(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "502") {
 		t.Fatalf("error should mention status 502: %v", err)
+	}
+	// Must be a typed HTTPStatusError so retry.go can classify.
+	var se *HTTPStatusError
+	if !errors.As(err, &se) {
+		t.Fatalf("error must be *HTTPStatusError, got %T: %v", err, err)
+	}
+	if se.Code != 502 {
+		t.Fatalf("HTTPStatusError.Code = %d", se.Code)
+	}
+}
+
+func TestConsume_EmptyArgsRejected(t *testing.T) {
+	cli, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("server should not be called when args are empty")
+	}))
+	cases := []struct{ name, rrid, cid string }{
+		{"both empty", "", ""},
+		{"empty credit_id", "rrid", ""},
+		{"empty redeem_request_id", "", "cid"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := cli.Consume(CodexCredentials{AccessToken: "t"}, tc.rrid, tc.cid)
+			if err == nil {
+				t.Fatalf("expected error for %s", tc.name)
+			}
+		})
+	}
+}
+
+func TestIsClientError_Classifies4xxVs5xx(t *testing.T) {
+	// 4xx -> hard stop (true); 5xx -> retry (false); network err -> retry (false).
+	cli4xx, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	cli5xx, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	_, err4 := cli4xx.Consume(CodexCredentials{AccessToken: "t"}, "rrid", "cid")
+	_, err5 := cli5xx.Consume(CodexCredentials{AccessToken: "t"}, "rrid", "cid")
+	if !IsClientError(err4) {
+		t.Fatalf("401 should be client error (hard stop): %v", err4)
+	}
+	if IsClientError(err5) {
+		t.Fatalf("502 should NOT be client error (retry): %v", err5)
+	}
+	if IsClientError(errors.New("some network dial error")) {
+		t.Fatalf("network error should NOT be client error (retry)")
 	}
 }
 

@@ -168,3 +168,53 @@ func truncate(b []byte, n int) string {
 	}
 	return string(b[:n]) + "..."
 }
+
+func TestAccountsRoute_ReturnsListWithEnabledFlag(t *testing.T) {
+	srv := newTestManagement(t, Config{
+		RefreshInterval: 12 * time.Hour,
+		TriggerLeadTime: 6 * time.Hour,
+		EnabledAccounts: []string{"idx-a"},
+	}, nil)
+	// Inject a fake lister so the test doesn't need the host ABI.
+	srv.h.lister = func() ([]AccountOption, error) {
+		return []AccountOption{
+			{AuthIndex: "idx-a", Label: "alice@example.com", Email: "alice@example.com"},
+			{AuthIndex: "idx-b", Label: "bob@example.com", Email: "bob@example.com"},
+		}, nil
+	}
+	status, body, _ := srv.h.handle(http.MethodGet, "/v0/management/plugins/codex-auto-reset/accounts", nil, nil)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d body %s", status, body)
+	}
+	var resp struct {
+		Accounts []AccountOption `json:"accounts"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("unmarshal: %v (body=%s)", err, body)
+	}
+	if len(resp.Accounts) != 2 {
+		t.Fatalf("got %d accounts, want 2", len(resp.Accounts))
+	}
+	// idx-a is in EnabledAccounts -> Enabled=true; idx-b -> false.
+	byIdx := map[string]bool{}
+	for _, a := range resp.Accounts {
+		byIdx[a.AuthIndex] = a.Enabled
+	}
+	if !byIdx["idx-a"] {
+		t.Fatalf("idx-a should be enabled")
+	}
+	if byIdx["idx-b"] {
+		t.Fatalf("idx-b should NOT be enabled")
+	}
+}
+
+func TestAccountsRoute_NoListerReturns503(t *testing.T) {
+	// When the host ABI is not wired (e.g. unit test without injection), the
+	// route should return 503, not 500 or crash.
+	srv := newTestManagement(t, DefaultConfig(), nil)
+	srv.h.lister = nil
+	status, _, _ := srv.h.handle(http.MethodGet, "/v0/management/plugins/codex-auto-reset/accounts", nil, nil)
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", status)
+	}
+}

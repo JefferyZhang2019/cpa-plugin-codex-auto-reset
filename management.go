@@ -10,6 +10,19 @@ import (
 
 const pluginID = "codex-auto-reset"
 
+// AccountLister returns the Codex accounts discoverable through CPA (via the
+// host.auth.list ABI callback). Injected from main.go so management.go has no
+// direct C/ABI dependency. Returns one entry per Codex auth file, sorted.
+type AccountLister func() ([]AccountOption, error)
+
+// AccountOption is one selectable Codex account for the UI's checkbox list.
+type AccountOption struct {
+	AuthIndex string `json:"auth_index"`
+	Label     string `json:"label"`  // human-readable (email / name)
+	Email     string `json:"email,omitempty"`
+	Enabled   bool   `json:"enabled"` // true if currently in EnabledAccounts
+}
+
 // managementHandlers owns the plugin's mutable state and serves the JSON
 // routes from spec §9. The HTML resource page (Task 12) is rendered by
 // renderStatusHTML, called from the resource/status route.
@@ -18,6 +31,7 @@ type managementHandlers struct {
 	state     *PluginState
 	statePath string
 	worker    *Worker
+	lister    AccountLister // may be nil if host ABI not wired (tests)
 }
 
 func newManagementHandlers(state *PluginState, statePath string, worker *Worker) *managementHandlers {
@@ -49,6 +63,9 @@ func (h *managementHandlers) handle(method, rawPath string, headers http.Header,
 			return http.StatusOK, []byte(renderStatusHTML(h.state)), "text/html; charset=utf-8"
 		}
 		st, b := h.statusJSON()
+		return st, b, "application/json"
+	case method == http.MethodGet && path == "/accounts":
+		st, b := h.accountsJSON()
 		return st, b, "application/json"
 	case method == http.MethodGet && path == "/logs":
 		st, b := h.logsJSON()
@@ -120,6 +137,29 @@ func (h *managementHandlers) statusJSON() (int, []byte) {
 	return jsonOK(out)
 }
 
+// accountsJSON returns the list of Codex accounts CPA knows about, annotated
+// with whether each is currently enabled. The UI renders these as checkboxes.
+func (h *managementHandlers) accountsJSON() (int, []byte) {
+	if h.lister == nil {
+		return jsonStatus(http.StatusServiceUnavailable, map[string]any{"error": "account listing unavailable (host not wired)"})
+	}
+	opts, err := h.lister()
+	if err != nil {
+		return jsonStatus(http.StatusBadGateway, map[string]any{"error": "list accounts: " + err.Error()})
+	}
+	// Mark enabled ones.
+	h.mu.Lock()
+	enabled := make(map[string]bool, len(h.state.Config.EnabledAccounts))
+	for _, id := range h.state.Config.EnabledAccounts {
+		enabled[id] = true
+	}
+	h.mu.Unlock()
+	for i := range opts {
+		opts[i].Enabled = enabled[opts[i].AuthIndex]
+	}
+	return jsonOK(map[string]any{"accounts": opts})
+}
+
 func (h *managementHandlers) putSettings(body []byte) (int, []byte) {
 	var req struct {
 		RefreshInterval string   `json:"refresh_interval"`
@@ -163,22 +203,6 @@ func (h *managementHandlers) putSettings(body []byte) (int, []byte) {
 		"trigger_lead_time": formatDuration(cfg.TriggerLeadTime),
 		"enabled_accounts":  cfg.EnabledAccounts,
 	})
-}
-
-// formatDuration renders a time.Duration as the shortest canonical Go duration
-// string (e.g. 4h, 2h, 30m0s) — i.e. what the user typed. time.Duration.String()
-// always emits Hh0m0s for whole-hour durations, but the management API echoes
-// the minimal form so round-trips through the UI stay clean.
-func formatDuration(d time.Duration) string {
-	s := d.String()
-	// time.Duration.String() never produces trailing zeros for whole
-	// values except the canonical "0s"; trim a trailing "0m0s" to get "4h"
-	// from "4h0m0s". This mirrors what time.ParseDuration accepts.
-	const suffix = "0m0s"
-	if strings.HasSuffix(s, suffix) {
-		return strings.TrimSuffix(s, suffix)
-	}
-	return s
 }
 
 func (h *managementHandlers) logsJSON() (int, []byte) {
@@ -354,9 +378,12 @@ func renderStatusHTML(state *PluginState) string {
           <label><span data-i18n="triggerLeadTime">Trigger lead time</span>
             <input id="triggerLeadTime" placeholder="6h" spellcheck="false">
           </label>
-          <label><span data-i18n="enabledAccounts">Enabled accounts (one per line)</span>
-            <textarea id="enabledAccounts" rows="4" spellcheck="false"></textarea>
-          </label>
+          <fieldset style="border:1px solid color-mix(in srgb, CanvasText 18%, Canvas 82%); border-radius:6px; padding:10px;">
+            <legend style="font-size:13px; font-weight:600; padding:0 6px;" data-i18n="enabledAccounts">Enabled accounts</legend>
+            <div id="accountCheckboxes" style="display:grid; gap:6px; max-height:200px; overflow-y:auto;">
+              <span class="muted" data-i18n="loadAccountsPrompt">Click "Load status" to list accounts.</span>
+            </div>
+          </fieldset>
           <div class="actions">
             <button id="saveSettings" type="button" data-i18n="save">Save settings</button>
           </div>
@@ -381,9 +408,11 @@ func renderStatusHTML(state *PluginState) string {
         refresh: "Refresh",
         refreshInterval: "Refresh interval",
         triggerLeadTime: "Trigger lead time",
-        enabledAccounts: "Enabled accounts (one per line)",
+        enabledAccounts: "Enabled accounts",
         save: "Save settings",
         loadPrompt: "Enter the CPA management key and click Load status.",
+        loadAccountsPrompt: "Click \"Load status\" to list accounts.",
+        noAccountsFound: "No Codex accounts found in CPA.",
         logs: "Logs",
         check: "Check",
         checkAll: "Check all",
@@ -404,7 +433,9 @@ func renderStatusHTML(state *PluginState) string {
         refresh: "\u5237\u65b0",
         refreshInterval: "\u5237\u65b0\u95f4\u9694",
         triggerLeadTime: "\u63d0\u524d\u89e6\u53d1\u65f6\u95f4",
-        enabledAccounts: "\u542f\u7528\u7684\u8d26\u53f7\uff08\u6bcf\u884c\u4e00\u4e2a\uff09",
+        enabledAccounts: "\u542f\u7528\u7684\u8d26\u53f7",
+        loadAccountsPrompt: "\u70b9\u51fb\u201c\u52a0\u8f7d\u72b6\u6001\u201d\u4ee5\u5217\u51fa\u8d26\u53f7\u3002",
+        noAccountsFound: "\u672a\u5728 CPA \u4e2d\u627e\u5230 Codex \u8d26\u53f7\u3002",
         save: "\u4fdd\u5b58\u8bbe\u7f6e",
         loadPrompt: "\u8bf7\u8f93\u5165 CPA \u7ba1\u7406\u5bc6\u94a5\u5e76\u70b9\u51fb\u52a0\u8f7d\u72b6\u6001\u3002",
         logs: "\u65e5\u5fd7",
@@ -512,24 +543,44 @@ func renderStatusHTML(state *PluginState) string {
     }
     async function loadStatus() {
       try {
-        const status = await apiGet('/v0/management/plugins/codex-auto-reset/status');
-        const logsResp = await apiGet('/v0/management/plugins/codex-auto-reset/logs');
+        const results = await Promise.all([
+          apiGet('/v0/management/plugins/codex-auto-reset/status'),
+          apiGet('/v0/management/plugins/codex-auto-reset/logs'),
+          apiGet('/v0/management/plugins/codex-auto-reset/accounts').catch(function () { return { accounts: [] }; }),
+        ]);
+        const status = results[0], logsResp = results[1], acctsResp = results[2];
         renderAccounts(status);
         renderLogs(logsResp.entries || []);
         const c = status.config || {};
         document.getElementById('refreshInterval').value = (c.refresh_interval || '').toString();
         document.getElementById('triggerLeadTime').value = (c.trigger_lead_time || '').toString();
-        document.getElementById('enabledAccounts').value = (c.enabled_accounts || []).join('\n');
+        renderAccountCheckboxes(acctsResp.accounts || []);
       } catch (e) { alert(e.message); }
+    }
+    function renderAccountCheckboxes(accts) {
+      var box = document.getElementById('accountCheckboxes');
+      if (!accts || accts.length === 0) {
+        box.innerHTML = '<label style="font-size:12px;" class="muted">' + escapeHTML(t('noAccountsFound')) + '</label>';
+        return;
+      }
+      box.innerHTML = accts.map(function (a) {
+        var checked = a.enabled ? ' checked' : '';
+        var label = escapeHTML(a.label || a.auth_index) + (a.email && a.email !== a.label ? ' &lt;' + escapeHTML(a.email) + '&gt;' : '');
+        return '<label style="display:flex; align-items:center; gap:8px; font-size:13px; font-weight:500;">' +
+               '<input type="checkbox" class="acct-checkbox" value="' + escapeHTML(a.auth_index) + '"' + checked + ' style="width:auto; margin:0;">' +
+               '<span>' + label + '</span></label>';
+      }).join('');
+    }
+    function getEnabledAccounts() {
+      return Array.prototype.slice.call(document.querySelectorAll('.acct-checkbox:checked'))
+        .map(function (cb) { return cb.value; });
     }
     async function saveSettings() {
       try {
-        const enabled = document.getElementById('enabledAccounts').value
-          .split('\n').map(function (s) { return s.trim(); }).filter(Boolean);
         await apiSend('PUT', '/v0/management/plugins/codex-auto-reset/settings', {
           refresh_interval: document.getElementById('refreshInterval').value.trim(),
           trigger_lead_time: document.getElementById('triggerLeadTime').value.trim(),
-          enabled_accounts: enabled
+          enabled_accounts: getEnabledAccounts()
         });
         alert(t('settingsSaved'));
       } catch (e) { alert(e.message); }

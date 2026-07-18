@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -81,5 +83,50 @@ func TestParseConfigYAML_Malformed(t *testing.T) {
 	_, err := parseConfigYAML([]byte(`not: [valid: yaml`))
 	if err == nil {
 		t.Fatalf("expected error on malformed YAML")
+	}
+}
+
+// TestConfig_MarshalJSON_ProducesDurationStrings verifies the management UI's
+// status JSON shows "12h" instead of the raw nanosecond integer
+// (43200000000000). Regression guard for the unreadable-JSON bug.
+func TestConfig_MarshalJSON_ProducesDurationStrings(t *testing.T) {
+	cfg := Config{RefreshInterval: 12 * time.Hour, TriggerLeadTime: 6 * time.Hour, EnabledAccounts: []string{"a"}}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	body := string(raw)
+	for _, want := range []string{`"refresh_interval":"12h"`, `"trigger_lead_time":"6h"`, `"enabled_accounts":["a"]`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("JSON missing %q; got %s", want, body)
+		}
+	}
+	if strings.Contains(body, "43200000000000") {
+		t.Fatalf("JSON leaked nanosecond integer: %s", body)
+	}
+}
+
+// TestConfig_UnmarshalJSON_AcceptsStringAndNanoseconds verifies round-trip
+// from both the human string form and Go's default nanosecond integer form.
+func TestConfig_UnmarshalJSON_AcceptsStringAndNanoseconds(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want time.Duration
+	}{
+		{"string_form", `{"refresh_interval":"4h"}`, 4 * time.Hour},
+		{"ns_integer_form", `{"refresh_interval":14400000000000}`, 4 * time.Hour},
+		{"empty", `{"refresh_interval":""}`, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var c Config
+			if err := json.Unmarshal([]byte(tc.raw), &c); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if c.RefreshInterval != tc.want {
+				t.Fatalf("RefreshInterval = %v, want %v", c.RefreshInterval, tc.want)
+			}
+		})
 	}
 }

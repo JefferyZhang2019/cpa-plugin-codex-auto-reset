@@ -53,6 +53,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -318,7 +319,41 @@ func configurePlugin(raw []byte) error {
 		globalHandlers.statePath = statePath
 		globalHandlers.worker = globalWorker
 	}
+	globalHandlers.lister = listCodexAccountsForUI
 	return nil
+}
+
+// listCodexAccountsForUI is the AccountLister wired into managementHandlers.
+// It calls the host ABI to enumerate CPA's auth files and returns the Codex
+// ones, sorted, for the UI's checkbox list.
+func listCodexAccountsForUI() ([]AccountOption, error) {
+	auths, err := listAuthsViaHost()
+	if err != nil {
+		return nil, err
+	}
+	opts := make([]AccountOption, 0, len(auths))
+	for _, a := range auths {
+		if !strings.EqualFold(a.Provider, "codex") && !strings.EqualFold(a.Type, "codex") {
+			continue
+		}
+		if a.Disabled || a.Unavailable {
+			continue
+		}
+		label := a.Email
+		if label == "" {
+			label = a.Label
+		}
+		if label == "" {
+			label = a.AuthIndex
+		}
+		opts = append(opts, AccountOption{
+			AuthIndex: a.AuthIndex,
+			Label:     label,
+			Email:     a.Email,
+		})
+	}
+	sort.Slice(opts, func(i, j int) bool { return opts[i].Label < opts[j].Label })
+	return opts, nil
 }
 
 func pluginRegistration() registration {
@@ -342,6 +377,7 @@ func managementRegistrationResponse() pluginapi.ManagementRegistrationResponse {
 	}}
 	routes := []pluginapi.ManagementRoute{
 		{Method: http.MethodGet, Path: "/plugins/codex-auto-reset/status"},
+		{Method: http.MethodGet, Path: "/plugins/codex-auto-reset/accounts"},
 		{Method: http.MethodGet, Path: "/plugins/codex-auto-reset/logs"},
 		{Method: http.MethodPut, Path: "/plugins/codex-auto-reset/settings"},
 		{Method: http.MethodPost, Path: "/plugins/codex-auto-reset/check"},

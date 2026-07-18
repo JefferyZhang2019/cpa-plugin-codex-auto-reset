@@ -432,6 +432,8 @@ func renderStatusHTML(state *PluginState) string {
         nextState: "Next",
         lastCycle: "Last cycle",
         noAccounts: "No accounts enabled.",
+        neverExpires: "never expires",
+        expired: "expired",
         settingsSaved: "Settings saved.",
         confirmReset: "Force a reset cycle for this account now?",
         keyRequired: "Management key is required."
@@ -459,6 +461,8 @@ func renderStatusHTML(state *PluginState) string {
         nextState: "\u4e0b\u4e00\u8f6e",
         lastCycle: "\u4e0a\u4e00\u8f6e",
         noAccounts: "\u672a\u542f\u7528\u4efb\u4f55\u8d26\u53f7\u3002",
+        neverExpires: "\u6c38\u4e0d\u8fc7\u671f",
+        expired: "\u5df2\u8fc7\u671f",
         settingsSaved: "\u8bbe\u7f6e\u5df2\u4fdd\u5b58\u3002",
         confirmReset: "\u7acb\u5373\u5bf9\u8be5\u8d26\u53f7\u89e6\u53d1\u4e00\u6b21\u91cd\u7f6e\u6d41\u7a0b\uff1f",
         keyRequired: "\u9700\u8981\u7ba1\u7406\u5bc6\u94a5\u3002"
@@ -514,7 +518,7 @@ func renderStatusHTML(state *PluginState) string {
         .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
-    function renderAccounts(status) {
+    function renderAccounts(status, logEntries) {
       const box = document.getElementById('accounts');
       const accts = (status && status.accounts) || {};
       const ids = Object.keys(accts);
@@ -522,40 +526,76 @@ func renderStatusHTML(state *PluginState) string {
         box.innerHTML = '<p class="muted">' + escapeHTML(t('noAccounts')) + '</p>';
         return;
       }
+      // Build per-account last-log lookup: most recent entry per scope.
+      const lastLogByScope = {};
+      (logEntries || []).forEach(function (e) {
+        if (!e.scope) return;
+        lastLogByScope[e.scope] = e;
+      });
       box.innerHTML = ids.sort().map(function (id) {
         const a = accts[id] || {};
         const state = a.state || 'IDLE';
-        // Prefer last_snapshot (set on every IDLE patrol); fall back to
-        // attempt.pre_snapshot during an active reset cycle.
         const snap = a.last_snapshot || (a.attempt && a.attempt.pre_snapshot) || {};
         const credits = snap.available_count == null ? '-' : snap.available_count;
         const weekly = snap.weekly_pct == null || snap.weekly_pct < 0 ? '-' : snap.weekly_pct + '%';
         const nextAt = a.next_wake || '';
-        // Find the soonest-expiring credit from the snapshot for display.
-        let nextExpiry = '';
+        const displayName = escapeHTML(accountNameMap[id] || id);
+
+        // Credit list with per-credit remaining time + target marker.
+        let creditListHtml = '';
         if (snap.credits && snap.credits.length > 0) {
-          const soonest = snap.credits
-            .filter(function (c) { return c.expires_at; })
-            .sort(function (x, y) { return x.expires_at.localeCompare(y.expires_at); })[0];
-          if (soonest) {
-            nextExpiry = fmtTime(soonest.expires_at);
-          }
+          const sorted = snap.credits.slice().sort(function (x, y) {
+            const xe = x.expires_at || '9999', ye = y.expires_at || '9999';
+            return xe.localeCompare(ye);
+          });
+          creditListHtml = sorted.map(function (c, idx) {
+            const remain = c.expires_at ? fmtRemain(c.expires_at) : t('neverExpires');
+            const isTarget = idx === 0 ? ' <span class="muted" style="font-size:10px;">← target</span>' : '';
+            return '<div style="font-size:12px; padding-left:12px;">• ' + escapeHTML(c.id.substring(0, 24)) + '… ' + escapeHTML(remain) + isTarget + '</div>';
+          }).join('');
+        } else {
+          creditListHtml = '<div class="muted" style="font-size:12px; padding-left:12px;">—</div>';
         }
+
+        // Last log line for this account.
+        const lastLog = lastLogByScope[id];
+        const lastLogHtml = lastLog
+          ? '<span class="k">' + escapeHTML(t('lastCycle')) + '</span><span style="font-size:11px;">' + escapeHTML(lastLog.message) + '</span>'
+          : '';
+
         return '<div class="card">' +
-          '<div class="card-head"><span class="auth-id">' + escapeHTML(accountNameMap[id] || id) + '</span>' +
+          '<div class="card-head"><span class="auth-id">' + displayName + '</span>' +
           '<span class="state-badge ' + escapeHTML(state) + '">' + escapeHTML(state) + '</span></div>' +
           '<div class="kv">' +
           '<span class="k">' + escapeHTML(t('creditsAvail')) + '</span><span>' + escapeHTML(String(credits)) + '</span>' +
           '<span class="k">' + escapeHTML(t('weeklyRemain')) + '</span><span>' + escapeHTML(weekly) + '</span>' +
-          (nextExpiry ? '<span class="k">' + escapeHTML(t('nextExpiry')) + '</span><span>' + escapeHTML(nextExpiry) + '</span>' : '') +
-          '<span class="k">' + escapeHTML(t('nextState')) + '</span><span class="next" data-next="' + escapeHTML(nextAt) + '">' + escapeHTML(fmtTime(nextAt)) + ' <span class="countdown"></span></span>' +
           '</div>' +
+          creditListHtml +
+          (lastLogHtml ? '<div class="kv" style="margin-top:6px;">' + lastLogHtml + '</div>' : '') +
+          '<div class="next" style="margin-top:6px; font-size:12px; padding:6px 8px; border-radius:4px; background:color-mix(in srgb,#2563eb 6%,Canvas 94%);">' +
+          '<span class="k">' + escapeHTML(t('nextState')) + '</span> ' + escapeHTML(fmtTime(nextAt)) +
+          ' <span class="countdown muted" data-next="' + escapeHTML(nextAt) + '"></span></div>' +
           '<div class="actions" style="margin-top:8px;">' +
           '<button class="check-btn" data-auth="' + escapeHTML(id) + '">' + escapeHTML(t('check')) + '</button>' +
           '<button class="secondary reset-btn" data-auth="' + escapeHTML(id) + '">' + escapeHTML(t('reset')) + '</button>' +
           '</div>' +
           '</div>';
       }).join('');
+    }
+
+    // fmtRemain renders a human-readable remaining time from an ISO timestamp.
+    function fmtRemain(iso) {
+      if (!iso || iso.startsWith('0001-')) return t('neverExpires');
+      const d = new Date(iso);
+      if (isNaN(d)) return iso;
+      const ms = d - Date.now();
+      if (ms <= 0) return t('expired');
+      const days = Math.floor(ms / 86400000);
+      const hours = Math.floor((ms % 86400000) / 3600000);
+      const mins = Math.floor((ms % 3600000) / 60000);
+      if (days > 0) return days + 'd' + (hours > 0 ? ' ' + hours + 'h' : '');
+      if (hours > 0) return hours + 'h' + (mins > 0 ? ' ' + mins + 'm' : '');
+      return mins + 'm';
     }
     function renderLogs(entries) {
       const box = document.getElementById('logs');
@@ -587,7 +627,7 @@ func renderStatusHTML(state *PluginState) string {
         (acctsResp.accounts || []).forEach(function (a) {
           accountNameMap[a.auth_index] = a.name || a.email || a.auth_index;
         });
-        renderAccounts(status);
+        renderAccounts(status, logsResp.entries || []);
         renderLogs(logsResp.entries || []);
         const c = status.config || {};
         document.getElementById('refreshInterval').value = (c.refresh_interval || '').toString();

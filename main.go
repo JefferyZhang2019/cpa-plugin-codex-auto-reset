@@ -320,7 +320,37 @@ func configurePlugin(raw []byte) error {
 		globalHandlers.worker = globalWorker
 	}
 	globalHandlers.lister = listCodexAccountsForUI
+	globalHandlers.OnSettingsChanged = restartWorkerFromState
 	return nil
+}
+
+// restartWorkerFromState stops the current worker (if any) and starts a fresh
+// one using the current globalState.Config. Called on plugin load AND on every
+// PUT /settings so config changes (enabled_accounts, refresh_interval) take
+// effect immediately instead of requiring a plugin reload.
+func restartWorkerFromState() {
+	pluginStateMu.Lock()
+	defer pluginStateMu.Unlock()
+	if globalWorker != nil {
+		globalWorker.Stop()
+	}
+	cfg := globalState.Config
+	w := NewWorker(cfg, cfg.EnabledAccounts, hostCredsLoader, time.Now)
+	w.StateSync = func(authID string, fsm *AccountFSM) {
+		pluginStateMu.Lock()
+		globalState.Accounts[authID] = AccountRuntime{
+			AuthID:   authID,
+			State:    fsm.State(),
+			NextWake: fsm.NextWake(),
+		}
+		pluginStateMu.Unlock()
+		debouncedSaveState(defaultStatePath())
+	}
+	globalWorker = w
+	if globalHandlers != nil {
+		globalHandlers.worker = w
+	}
+	go w.Run()
 }
 
 // listCodexAccountsForUI is the AccountLister wired into managementHandlers.
@@ -339,17 +369,24 @@ func listCodexAccountsForUI() ([]AccountOption, error) {
 		if a.Disabled || a.Unavailable {
 			continue
 		}
-		label := a.Email
+		// Label preference: full file Name (most informative — includes team ID
+		// and email), then Label, then Email, then AuthIndex as last resort.
+		label := a.Name
 		if label == "" {
 			label = a.Label
+		}
+		if label == "" {
+			label = a.Email
 		}
 		if label == "" {
 			label = a.AuthIndex
 		}
 		opts = append(opts, AccountOption{
 			AuthIndex: a.AuthIndex,
+			Name:      a.Name,
 			Label:     label,
 			Email:     a.Email,
+			Account:   a.Account,
 		})
 	}
 	sort.Slice(opts, func(i, j int) bool { return opts[i].Label < opts[j].Label })

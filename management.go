@@ -18,9 +18,11 @@ type AccountLister func() ([]AccountOption, error)
 // AccountOption is one selectable Codex account for the UI's checkbox list.
 type AccountOption struct {
 	AuthIndex string `json:"auth_index"`
-	Label     string `json:"label"`  // human-readable (email / name)
+	Name      string `json:"name"`              // full credential file name (e.g. codex-teamID-email-team.json)
+	Label     string `json:"label"`             // human-readable display label (name, then email, then auth_index)
 	Email     string `json:"email,omitempty"`
-	Enabled   bool   `json:"enabled"` // true if currently in EnabledAccounts
+	Account   string `json:"account,omitempty"` // ChatGPT account ID
+	Enabled   bool   `json:"enabled"`           // true if currently in EnabledAccounts
 }
 
 // managementHandlers owns the plugin's mutable state and serves the JSON
@@ -31,7 +33,8 @@ type managementHandlers struct {
 	state     *PluginState
 	statePath string
 	worker    *Worker
-	lister    AccountLister // may be nil if host ABI not wired (tests)
+	lister    AccountLister        // may be nil if host ABI not wired (tests)
+	OnSettingsChanged func()       // injected by main.go; restarts the worker with new config
 }
 
 func newManagementHandlers(state *PluginState, statePath string, worker *Worker) *managementHandlers {
@@ -197,6 +200,12 @@ func (h *managementHandlers) putSettings(body []byte) (int, []byte) {
 	h.mu.Unlock()
 	if err := saveState(h.statePath, h.state); err != nil {
 		return jsonStatus(http.StatusInternalServerError, map[string]any{"error": err.Error()})
+	}
+	// Restart the worker so the new config (especially enabled_accounts and
+	// refresh_interval) takes effect immediately. Without this the worker
+	// keeps running with the old config until a plugin reload.
+	if h.OnSettingsChanged != nil {
+		h.OnSettingsChanged()
 	}
 	return jsonOK(map[string]any{
 		"refresh_interval": formatDuration(cfg.RefreshInterval),
@@ -565,10 +574,13 @@ func renderStatusHTML(state *PluginState) string {
       }
       box.innerHTML = accts.map(function (a) {
         var checked = a.enabled ? ' checked' : '';
-        var label = escapeHTML(a.label || a.auth_index) + (a.email && a.email !== a.label ? ' &lt;' + escapeHTML(a.email) + '&gt;' : '');
+        // Show the full file name (most informative: codex-teamID-email-team)
+        // as the primary label; show the ChatGPT account ID as secondary detail.
+        var primary = escapeHTML(a.name || a.label || a.auth_index);
+        var detail = a.account ? ' <span class="muted" style="font-size:11px;">(' + escapeHTML(a.account) + ')</span>' : '';
         return '<label style="display:flex; align-items:center; gap:8px; font-size:13px; font-weight:500;">' +
                '<input type="checkbox" class="acct-checkbox" value="' + escapeHTML(a.auth_index) + '"' + checked + ' style="width:auto; margin:0;">' +
-               '<span>' + label + '</span></label>';
+               '<span>' + primary + detail + '</span></label>';
       }).join('');
     }
     function getEnabledAccounts() {

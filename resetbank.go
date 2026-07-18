@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,6 +22,10 @@ type LogFn func(level, scope string, state State, msg, nextAction string, nextAt
 
 // AccountFSM is one account's state machine (spec §4). Deterministic given
 // inputs; the simulation in sim/engine.go already validated the transitions.
+//
+// Concurrency: the worker goroutine drives Step(). External readers (worker's
+// EachFSM, management handlers) may call State()/NextWake()/SetNextWake()/
+// ForceState() from other goroutines; all field access is guarded by mu.
 type AccountFSM struct {
 	AuthID string
 	Creds  CodexCredentials
@@ -29,6 +34,7 @@ type AccountFSM struct {
 	Now    func() time.Time
 	Logf   LogFn
 
+	mu        sync.Mutex
 	state     State
 	attempt   ResetAttempt
 	nextWake  time.Time
@@ -43,17 +49,47 @@ func NewAccountFSM(authID string, creds CodexCredentials, cfg Config, client Res
 	}
 }
 
-// State returns the current FSM state.
-func (f *AccountFSM) State() State { return f.state }
+// State returns the current FSM state (thread-safe).
+func (f *AccountFSM) State() State {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.state
+}
 
-// NextWake returns the most recently scheduled wake time (zero if none).
-func (f *AccountFSM) NextWake() time.Time { return f.nextWake }
+// NextWake returns the most recently scheduled wake time (thread-safe).
+func (f *AccountFSM) NextWake() time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.nextWake
+}
+
+// SetNextWake lets external callers (worker's TriggerCheck) override the
+// scheduled wake. Thread-safe.
+func (f *AccountFSM) SetNextWake(t time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextWake = t
+}
+
+// ForceState transitions the FSM to a target state (used by the worker's
+// manual-reset ForceConfirm path). Thread-safe.
+func (f *AccountFSM) ForceState(s State) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.state = s
+}
 
 // Step executes one FSM tick at f.Now() and returns the next scheduled wake.
 // Returns zero time when the cycle terminated (DONE). The behavior mirrors
 // sim/engine.go's step() one-to-one; that simulation validated the design
 // across 231 tests covering all (R, L) relations and edge cases.
+//
+// Step takes the FSM mutex for the whole tick; HTTP calls happen under lock,
+// which is fine because the FSM is driven by a single worker goroutine (no
+// other caller Step()s the same FSM).
 func (f *AccountFSM) Step() time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	switch f.state {
 	case StateIDLE:
 		return f.stepIDLE()
@@ -275,8 +311,10 @@ func (f *AccountFSM) stepVERIFYING() time.Time {
 }
 
 // Reset returns a DONE FSM to IDLE for the next patrol cycle. Called by the
-// worker after a cycle completes.
+// worker after a cycle completes. Thread-safe.
 func (f *AccountFSM) Reset() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.state = StateIDLE
 	f.attempt = ResetAttempt{}
 	f.verifyDue = time.Time{}

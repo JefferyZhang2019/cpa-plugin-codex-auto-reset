@@ -67,14 +67,16 @@ func parseResetCreditsResponse(raw []byte, now time.Time) (Snapshot, error) {
 	}, nil
 }
 
-// parseUsageResponse parses GET /wham/usage using flexible map lookups (same
-// approach as the sibling codex-quota-scheduler). The rate-limit windows may
-// appear under either code_review_rate_limit or rate_limit (top-level); both
-// have primary_window (5-hour) and secondary_window (weekly). We check both
-// paths and take the first secondary_window that reports a real used_percent.
-//
-// WeeklyPct is the REMAINING weekly quota (100 − used_percent), rounded.
-// If no secondary window is found, defaults to 100% (freshly reset or no data).
+// parseUsageResponse parses GET /wham/usage using flexible map lookups.
+// The real wire shape (confirmed from live data) is:
+//   "rate_limit": {
+//     "primary_window": {"limit_window_seconds": 604800, "used_percent": 9},
+//     "secondary_window": null
+//   }
+// primary_window can be the WEEKLY window (604800s) when there's no
+// secondary. We identify the weekly window by limit_window_seconds ≈ 604800,
+// NOT by position (primary/secondary). code_review_rate_limit may also be
+// present in some builds; we check both paths.
 func parseUsageResponse(raw []byte, now time.Time) (Snapshot, error) {
 	var doc map[string]any
 	if err := json.Unmarshal(raw, &doc); err != nil {
@@ -88,17 +90,27 @@ func parseUsageResponse(raw []byte, now time.Time) (Snapshot, error) {
 		}
 	}
 
-	weeklyUsed := -1.0 // sentinel: not found
-	// Check both paths for rate-limit windows, like the scheduler does.
-	for _, key := range []string{"code_review_rate_limit", "codeReviewRateLimit", "rate_limit", "rateLimit"} {
-		rl, ok := getMapAny(doc, key)
+	// Scan all rate-limit paths for a window whose limit_window_seconds ≈ 604800
+	// (weekly). The window may be primary or secondary — we check both and
+	// pick the weekly one by duration, not position.
+	weeklyUsed := -1.0
+	for _, rlKey := range []string{"rate_limit", "rateLimit", "code_review_rate_limit", "codeReviewRateLimit"} {
+		rl, ok := getMapAny(doc, rlKey)
 		if !ok {
 			continue
 		}
-		// Try secondary_window (weekly) — both snake_case and camelCase.
-		for _, swKey := range []string{"secondary_window", "secondaryWindow"} {
-			if sw, ok := getMapAny(rl, swKey); ok {
-				if used, ok := getFloatAny(sw, "used_percent", "usedPercent"); ok {
+		for _, winKey := range []string{"primary_window", "primaryWindow", "secondary_window", "secondaryWindow"} {
+			win, ok := getMapAny(rl, winKey)
+			if !ok {
+				continue
+			}
+			secs, hasSecs := getIntAny(win, "limit_window_seconds", "limitWindowSeconds")
+			if !hasSecs {
+				continue
+			}
+			// Weekly = ~604800 (7 * 86400). Accept ±1 hour tolerance.
+			if secs >= 600000 && secs <= 610000 {
+				if used, ok := getFloatAny(win, "used_percent", "usedPercent"); ok {
 					weeklyUsed = used
 					break
 				}

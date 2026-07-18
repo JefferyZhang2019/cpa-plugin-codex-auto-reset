@@ -35,36 +35,52 @@ func TestParseResetCreditsResponse_UpstreamContractFixture(t *testing.T) {
 }
 
 func TestParseUsageResponse_WeeklyPercent(t *testing.T) {
-	// Real /wham/usage shape (verified against codex-quota-scheduler): the
-	// weekly window is code_review_rate_limit.secondary_window, not a flat
-	// rate_limits[] array. used_percent 15 -> remaining 85.
+	// Real /wham/usage shape (confirmed from live data): primary_window IS
+	// the weekly window (limit_window_seconds=604800), secondary is null.
+	// used_percent 9 -> remaining 91.
 	raw := []byte(`{
-	  "plan_type":"plus",
-	  "rate_limit_reset_credits":{"available_count":1},
-	  "code_review_rate_limit":{
-	    "primary_window":{"used_percent":42,"limit_window_seconds":18000},
-	    "secondary_window":{"used_percent":15,"limit_window_seconds":604800}
+	  "plan_type":"team",
+	  "rate_limit_reset_credits":{"available_count":3},
+	  "rate_limit":{
+	    "allowed":true,
+	    "primary_window":{"used_percent":9,"limit_window_seconds":604800},
+	    "secondary_window":null
 	  }
 	}`)
 	snap, err := parseUsageResponse(raw, time.Now())
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	// weekly (secondary) used 15% => remaining 85
-	if snap.WeeklyPct != 85 {
-		t.Fatalf("WeeklyPct = %d, want 85", snap.WeeklyPct)
+	if snap.WeeklyPct != 91 {
+		t.Fatalf("WeeklyPct = %d, want 91", snap.WeeklyPct)
 	}
-	if snap.AvailableCount != 1 {
+	if snap.AvailableCount != 3 {
 		t.Fatalf("available_count = %d", snap.AvailableCount)
 	}
 }
 
-func TestParseUsageResponse_NoSecondaryWindowDefaultsFull(t *testing.T) {
-	// No secondary_window (e.g. freshly-reset account) -> treat as full (100%).
-	// Must NOT misread primary_window's used_percent as the weekly value.
+func TestParseUsageResponse_PrimaryIsFiveHour(t *testing.T) {
+	// When primary is 5-hour (18000s) and secondary is weekly (604800s),
+	// we must pick the secondary, not the primary.
 	raw := []byte(`{
-	  "plan_type":"plus",
-	  "code_review_rate_limit":{
+	  "rate_limit":{
+	    "primary_window":{"used_percent":99,"limit_window_seconds":18000},
+	    "secondary_window":{"used_percent":20,"limit_window_seconds":604800}
+	  }
+	}`)
+	snap, err := parseUsageResponse(raw, time.Now())
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if snap.WeeklyPct != 80 {
+		t.Fatalf("WeeklyPct = %d, want 80 (secondary 20%% used)", snap.WeeklyPct)
+	}
+}
+
+func TestParseUsageResponse_NoWeeklyWindowDefaultsFull(t *testing.T) {
+	// Only a 5-hour window, no weekly (604800s) -> treat as full (100%).
+	raw := []byte(`{
+	  "rate_limit":{
 	    "primary_window":{"used_percent":99,"limit_window_seconds":18000}
 	  }
 	}`)
@@ -73,11 +89,11 @@ func TestParseUsageResponse_NoSecondaryWindowDefaultsFull(t *testing.T) {
 		t.Fatalf("parse: %v", err)
 	}
 	if snap.WeeklyPct != 100 {
-		t.Fatalf("WeeklyPct = %d, want 100 when no secondary window (got primary bleed?)", snap.WeeklyPct)
+		t.Fatalf("WeeklyPct = %d, want 100 when no weekly window", snap.WeeklyPct)
 	}
 }
 
-func TestParseUsageResponse_NoCodeReviewRateLimitDefaultsFull(t *testing.T) {
+func TestParseUsageResponse_NoRateLimitDefaultsFull(t *testing.T) {
 	raw := []byte(`{"plan_type":"plus"}`)
 	snap, err := parseUsageResponse(raw, time.Now())
 	if err != nil {
@@ -89,10 +105,10 @@ func TestParseUsageResponse_NoCodeReviewRateLimitDefaultsFull(t *testing.T) {
 }
 
 func TestParseUsageResponse_OverageClampsToZero(t *testing.T) {
-	// used_percent > 100 (server-side overage) must clamp remaining to 0, not go negative.
+	// used_percent > 100 must clamp remaining to 0.
 	raw := []byte(`{
-	  "code_review_rate_limit":{
-	    "secondary_window":{"used_percent":150,"limit_window_seconds":604800}
+	  "rate_limit":{
+	    "primary_window":{"used_percent":150,"limit_window_seconds":604800}
 	  }
 	}`)
 	snap, err := parseUsageResponse(raw, time.Now())
@@ -133,7 +149,7 @@ func TestParseUsageResponse_CamelCaseFallback(t *testing.T) {
 	// camelCase variant of field names.
 	raw := []byte(`{
 	  "rateLimit":{
-	    "secondaryWindow":{"usedPercent":30}
+	    "secondaryWindow":{"usedPercent":30,"limitWindowSeconds":604800}
 	  }
 	}`)
 	snap, err := parseUsageResponse(raw, time.Now())

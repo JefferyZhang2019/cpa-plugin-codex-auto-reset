@@ -541,7 +541,7 @@ func renderStatusHTML(state *PluginState) string {
         const nextAt = a.next_wake || '';
         const displayName = escapeHTML(accountNameMap[id] || id);
 
-        // Credit list: YYMMDDHHMMSS expiry + remaining time + target marker.
+        // Credit list: ID + YYYY-MM-DD HH:MM:SS + remaining + target marker.
         let creditListHtml = '';
         if (snap.credits && snap.credits.length > 0) {
           const sorted = snap.credits.slice().sort(function (x, y) {
@@ -549,10 +549,11 @@ func renderStatusHTML(state *PluginState) string {
             return xe.localeCompare(ye);
           });
           creditListHtml = sorted.map(function (c, idx) {
+            const cid = escapeHTML(shortCreditID(c.id));
             const expiryStr = c.expires_at ? fmtExpiryCompact(c.expires_at) : '—';
             const remain = c.expires_at ? fmtRemainLocalized(c.expires_at) : t('neverExpires');
             const isTarget = idx === 0 ? ' <span class="muted" style="font-size:10px;">← target</span>' : '';
-            return '<div style="font-size:12px; padding-left:12px;">• <span class="muted">' + escapeHTML(expiryStr) + '</span> ' + escapeHTML(remain) + isTarget + '</div>';
+            return '<div style="font-size:12px; padding-left:12px;">• ' + cid + ' <span class="muted">' + escapeHTML(expiryStr) + '</span> ' + escapeHTML(remain) + isTarget + '</div>';
           }).join('');
         } else {
           creditListHtml = '<div class="muted" style="font-size:12px; padding-left:12px;">—</div>';
@@ -568,8 +569,8 @@ func renderStatusHTML(state *PluginState) string {
           '<div class="card-head"><span class="auth-id">' + displayName + '</span>' +
           '<span class="state-badge ' + escapeHTML(state) + '">' + escapeHTML(state) + '</span></div>' +
           '<div class="kv">' +
-          '<span class="k">' + escapeHTML(t('creditsAvail')) + '</span><span>' + escapeHTML(String(credits)) + '</span>' +
           '<span class="k">' + escapeHTML(t('weeklyRemain')) + '</span><span>' + escapeHTML(weekly) + '</span>' +
+          '<span class="k">' + escapeHTML(t('creditsAvail')) + '</span><span>' + escapeHTML(String(credits)) + '</span>' +
           '</div>' +
           creditListHtml +
           (lastLogHtml ? '<div class="kv" style="margin-top:6px;">' + lastLogHtml + '</div>' : '') +
@@ -599,19 +600,28 @@ func renderStatusHTML(state *PluginState) string {
       return mins + 'm';
     }
 
-    // fmtExpiryCompact renders an ISO timestamp as YYMMDDHHMMSS (user's
-    // preferred format for credit expiry display).
+    // fmtExpiryCompact renders an ISO timestamp as YYYY-MM-DD HH:MM:SS
+    // (full readable date for credit expiry display).
     function fmtExpiryCompact(iso) {
       if (!iso || iso.startsWith('0001-')) return '—';
       const d = new Date(iso);
       if (isNaN(d)) return iso;
-      const yy = String(d.getFullYear()).slice(2);
+      const yyyy = d.getFullYear();
       const MM = String(d.getMonth() + 1).padStart(2, '0');
       const dd = String(d.getDate()).padStart(2, '0');
       const HH = String(d.getHours()).padStart(2, '0');
       const mm = String(d.getMinutes()).padStart(2, '0');
       const ss = String(d.getSeconds()).padStart(2, '0');
-      return yy + MM + dd + HH + mm + ss;
+      return yyyy + '-' + MM + '-' + dd + ' ' + HH + ':' + mm + ':' + ss;
+    }
+
+    // shortCreditID extracts the hex prefix from a RateLimitResetCredit ID.
+    // "RateLimitResetCredit_d7087f83469c819182a87d5916512c9c" -> "d7087f83…"
+    function shortCreditID(id) {
+      if (!id) return '';
+      const prefix = 'RateLimitResetCredit_';
+      var s = id.startsWith(prefix) ? id.substring(prefix.length) : id;
+      return s.length > 10 ? s.substring(0, 8) + '…' : s;
     }
 
     // fmtRemainLocalized renders remaining time in the selected language:

@@ -70,6 +70,8 @@ func (h *managementHandlers) handle(method, rawPath string, headers http.Header,
 	case method == http.MethodGet && path == "/accounts":
 		st, b := h.accountsJSON()
 		return st, b, "application/json"
+	case method == http.MethodGet && path == "/debug/usage":
+		return h.debugUsage()
 	case method == http.MethodGet && path == "/logs":
 		st, b := h.logsJSON()
 		return st, b, "application/json"
@@ -142,6 +144,52 @@ func (h *managementHandlers) statusJSON() (int, []byte) {
 
 // accountsJSON returns the list of Codex accounts CPA knows about, annotated
 // with whether each is currently enabled. The UI renders these as checkboxes.
+// debugUsage fetches the raw /wham/usage response for the first enabled
+// account and returns it verbatim. Temporary diagnostic to determine the
+// real wire shape of weekly quota data.
+func (h *managementHandlers) debugUsage() (int, []byte, string) {
+	h.mu.Lock()
+	enabled := h.state.Config.EnabledAccounts
+	h.mu.Unlock()
+	if len(enabled) == 0 {
+		st, b := jsonStatus(http.StatusBadRequest, map[string]any{"error": "no enabled accounts"})
+		return st, b, "application/json"
+	}
+	if h.worker == nil {
+		st, b := jsonStatus(http.StatusServiceUnavailable, map[string]any{"error": "worker not running"})
+		return st, b, "application/json"
+	}
+	// Grab the first FSM's credentials + client.
+	var fsm *AccountFSM
+	h.worker.EachFSM(func(f *AccountFSM) {
+		if fsm == nil {
+			fsm = f
+		}
+	})
+	if fsm == nil {
+		st, b := jsonStatus(http.StatusServiceUnavailable, map[string]any{"error": "no FSM available"})
+		return st, b, "application/json"
+	}
+	// Do a raw HTTP GET to see the actual response body.
+	cli := &OpenAIClient{}
+	req, err := http.NewRequest(http.MethodGet, defaultBaseURL+usageEndpointPath, nil)
+	if err != nil {
+		st, b := jsonStatus(http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return st, b, "application/json"
+	}
+	req.Header.Set("Authorization", "Bearer "+fsm.Creds.AccessToken)
+	if fsm.Creds.ChatGPTAccountID != "" {
+		req.Header.Set("Chatgpt-Account-Id", fsm.Creds.ChatGPTAccountID)
+	}
+	req.Header.Set("User-Agent", codexUserAgent)
+	body, err := cli.do(req)
+	if err != nil {
+		st, b := jsonStatus(http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return st, b, "application/json"
+	}
+	return http.StatusOK, body, "application/json"
+}
+
 func (h *managementHandlers) accountsJSON() (int, []byte) {
 	if h.lister == nil {
 		return jsonStatus(http.StatusServiceUnavailable, map[string]any{"error": "account listing unavailable (host not wired)"})

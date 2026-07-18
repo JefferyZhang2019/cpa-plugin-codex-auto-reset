@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"sort"
 	"time"
 )
@@ -64,7 +63,8 @@ type LogEntry struct {
 // availableCreditsSorted implements spec §2.3: filter to status=="available"
 // AND expires_at > now (local defensive filter against server-side cleanup
 // lag), then sort ascending by ExpiresAt with zero-expiry ("never") entries
-// last. This is the production equivalent of sim/engine.go's pickTarget.
+// last. This is the production port of the filter+sort that the simulation
+// validated in sim/engine.go's FakeOpenAIClient.list plus pickTarget.
 func availableCreditsSorted(credits []Credit, now time.Time) []Credit {
 	out := make([]Credit, 0, len(credits))
 	for _, c := range credits {
@@ -86,11 +86,4 @@ func availableCreditsSorted(credits []Credit, now time.Time) []Credit {
 		return out[i].ExpiresAt.Before(out[j].ExpiresAt)
 	})
 	return out
-}
-
-// MarshalJSON on LogEntry ensures an empty entry marshals as {} rather than
-// null when emitted into JSON logs.
-func (l LogEntry) MarshalJSON() ([]byte, error) {
-	type alias LogEntry
-	return json.Marshal(alias(l))
 }

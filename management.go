@@ -566,6 +566,33 @@ func renderStatusHTML(state *PluginState) string {
         .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
+    // describeNextAction renders the "next" line based on FSM state.
+    function describeNextAction(state, nextAt) {
+      const zh = document.getElementById('locale').value === 'zh';
+      const time = nextAt && !nextAt.startsWith('0001-') ? fmtTime(nextAt) : '';
+      const prefix = zh ? '下一轮' : 'Next';
+      switch (state) {
+        case 'IDLE':
+          return zh
+            ? (time ? '下一轮检查将在 ' + time + ' 发生（巡查重置次数）' : '等待调度')
+            : (time ? 'next patrol at ' + time + ' (check credits)' : 'pending');
+        case 'ARMED':
+          return zh
+            ? (time ? '将在 ' + time + ' 触发重置（进入确认流程）' : '即将触发')
+            : (time ? 'trigger at ' + time + ' (enter confirm)' : 'imminent');
+        case 'CONFIRMING':
+          return zh ? '正在二次确认，准备发送重置请求' : 'confirming before reset';
+        case 'RESETTING':
+          return zh ? '已发送重置请求，等待响应' : 'reset request sent, awaiting response';
+        case 'VERIFYING':
+          return zh ? (time ? '将在 ' + time + ' 验证重置结果' : '正在验证') : (time ? 'verify at ' + time : 'verifying');
+        case 'DONE':
+          return zh ? '本轮完成，即将恢复巡查' : 'cycle complete, resuming patrol';
+        default:
+          return zh ? '未知状态' : 'unknown';
+      }
+    }
+
     function renderAccounts(status, logEntries) {
       const box = document.getElementById('accounts');
       const accts = (status && status.accounts) || {};
@@ -609,9 +636,16 @@ func renderStatusHTML(state *PluginState) string {
 
         // Last log line for this account.
         const lastLog = lastLogByScope[id];
-        const lastLogHtml = lastLog
-          ? '<span class="k">' + escapeHTML(t('lastCycle')) + '</span><span style="font-size:11px;">' + escapeHTML(translateLog(lastLog.message)) + '</span>'
-          : '';
+        const lastMsg = lastLog ? escapeHTML(translateLog(lastLog.message)) : '—';
+        // Determine next action description based on state.
+        const nextDesc = describeNextAction(state, nextAt);
+
+        // Combined last+next panel with tinted background.
+        const statusPanel =
+          '<div class="next" style="margin-top:6px; font-size:12px; padding:8px 10px; border-radius:4px; background:color-mix(in srgb,#2563eb 6%,Canvas 94%);" data-next="' + escapeHTML(nextAt) + '">' +
+          '<div>• <span class="k">' + escapeHTML(t('lastCycle')) + '</span> ' + lastMsg + '</div>' +
+          '<div style="margin-top:3px;">• ' + nextDesc + ' <span class="countdown-text muted"></span></div>' +
+          '</div>';
 
         return '<div class="card">' +
           '<div class="card-head"><span class="auth-id">' + displayName + '</span>' +
@@ -621,10 +655,7 @@ func renderStatusHTML(state *PluginState) string {
           '<span class="k">' + escapeHTML(t('creditsAvail')) + '</span><span>' + escapeHTML(String(credits)) + '</span>' +
           '</div>' +
           creditListHtml +
-          (lastLogHtml ? '<div class="kv" style="margin-top:6px;">' + lastLogHtml + '</div>' : '') +
-          '<div class="next" style="margin-top:6px; font-size:12px; padding:6px 8px; border-radius:4px; background:color-mix(in srgb,#2563eb 6%,Canvas 94%);" data-next="' + escapeHTML(nextAt) + '">' +
-          '<span class="k">' + escapeHTML(t('nextState')) + '</span> ' + escapeHTML(fmtTime(nextAt)) +
-          ' <span class="countdown-text muted"></span></div>' +
+          statusPanel +
           '<div class="actions" style="margin-top:8px;">' +
           '<button class="check-btn" data-auth="' + escapeHTML(id) + '">' + escapeHTML(t('check')) + '</button>' +
           '<button class="secondary reset-btn" data-auth="' + escapeHTML(id) + '">' + escapeHTML(t('reset')) + '</button>' +

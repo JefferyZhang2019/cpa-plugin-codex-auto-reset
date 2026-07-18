@@ -187,7 +187,7 @@ Each enabled account owns one independent state machine instance.
 | State | Meaning |
 |---|---|
 | `IDLE` | Steady state. Waiting for next `refresh_interval` check. No credit is near its trigger window. |
-| `ARMED` | A credit's trigger window (`expiry − trigger_lead_time`) is within one `refresh_interval` of now, OR has already opened. Re-check this account every `armed_check_interval` so the moment the window opens is not missed (a 12h IDLE cadence with a 6h `lead_time` could otherwise step over the window opener and lose the credit). |
+| `ARMED` | A credit's trigger window (`expiry − trigger_lead_time`) is within one `refresh_interval` of now, OR has already opened. ARMED performs no polling — it sleeps directly until the trigger time `T`, then transitions to CONFIRMING. This avoids the wasted re-check traffic of an interval-based ARMED while still guaranteeing the trigger-window opener is caught even when the IDLE cadence (e.g. 12h) would otherwise step over it. |
 | `CONFIRMING` | The trigger window is open (`now >= expiry − trigger_lead_time`). Performing the pre-reset confirmation GET (verify credit still present, record pre-snapshot). |
 | `RESETTING` | POST /consume sent (or mid-retry). Waiting for a terminal response. |
 | `VERIFYING` | Reset reported success. After a hardcoded delay, performing post-reset verification GET. |
@@ -209,10 +209,9 @@ IDLE
                                                    -> ARMED
 
 ARMED
-  re-check every armed_check_interval (15 min):
-    - now < trigger_window_opens_at                -> stay ARMED (window not open yet)
-    - now >= trigger_window_opens_at AND credit still available -> CONFIRMING
-    - credit gone / no longer available            -> IDLE
+  sleep until trigger_window_opens_at (T), no intermediate polling:
+    - on wake, now >= T AND credit still available -> CONFIRMING
+    - on wake, credit gone / no longer available   -> IDLE
 
 CONFIRMING
   GET credits + GET usage (record pre-snapshot):
@@ -361,8 +360,9 @@ goroutine computes the minimum `nextCheckAt` across all enabled
 accounts and sleeps until then (capped at `refresh_interval`).
 
 - IDLE accounts: `nextCheckAt = now + refresh_interval`.
-- ARMED accounts: `nextCheckAt = now + armed_check_interval` (15 min,
-  hardcoded) so the moment the trigger window opens is caught promptly.
+- ARMED accounts: `nextCheckAt = trigger_window_opens_at` (T). ARMED performs
+  no intermediate polling; it sleeps directly to T so the window opener is
+  caught exactly on time regardless of where the IDLE cadence landed.
 - After any check completes, `nextCheckAt` is recomputed from the
   completion time.
 
@@ -423,12 +423,12 @@ These live in `constants.go` and are never exposed via config or UI:
 
 - All three OpenAI endpoint URLs (§2.1).
 - Request headers and User-Agent (§2.2).
-- `armed_check_interval = 15 * time.Minute`.
 - `post_reset_verify_delay = 1 * time.Minute`.
 - `reset_retry_delays = [1m, 2m, 5m, 10m, 30m]`.
 - `max_log_entries = 200`.
 - `log_retention = 24h`.
 - Credit selection algorithm (§2.3).
+- ARMED sleep-to-T behavior (no polling constant — §4.1).
 
 ## 8. Logging
 

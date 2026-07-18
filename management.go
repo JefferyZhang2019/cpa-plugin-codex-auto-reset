@@ -819,8 +819,16 @@ func renderStatusHTML(state *PluginState) string {
       catch (e) { alert(e.message); }
     }
     function onLoad() {
-      document.getElementById('locale').value = (navigator.language || '').toLowerCase().indexOf('zh') === 0 ? 'zh' : 'en';
-      document.getElementById('locale').addEventListener('change', applyI18n);
+      const savedLocale = localStorage.getItem('codex-auto-reset-locale');
+      if (savedLocale === 'zh' || savedLocale === 'en') {
+        document.getElementById('locale').value = savedLocale;
+      } else {
+        document.getElementById('locale').value = (navigator.language || '').toLowerCase().indexOf('zh') === 0 ? 'zh' : 'en';
+      }
+      document.getElementById('locale').addEventListener('change', function () {
+        localStorage.setItem('codex-auto-reset-locale', document.getElementById('locale').value);
+        applyI18n();
+      });
       document.getElementById('refresh').addEventListener('click', loadStatus);
       document.getElementById('load').addEventListener('click', loadStatus);
       document.getElementById('saveSettings').addEventListener('click', saveSettings);

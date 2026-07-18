@@ -137,6 +137,7 @@ func (f *AccountFSM) stepARMED() time.Time {
 	// ARMED only sleeps to T; the wake has happened. Proceed to CONFIRMING.
 	// Zero extra GETs in this state (revised design).
 	f.state = StateCONFIRMING
+	f.log("info", "armed wake at T, confirming", "send POST /consume", nil, nil)
 	return f.now() // re-enter immediately
 }
 
@@ -154,6 +155,18 @@ func (f *AccountFSM) stepCONFIRMING() time.Time {
 		f.log("warn", "target credit vanished before reset", "abandon", nil, nil)
 		return time.Time{}
 	}
+	// Fetch usage separately so PreSnapshot.WeeklyPct carries a real value.
+	// The reset-credits endpoint does NOT return weekly % (parseResetCreditsResponse
+	// sets WeeklyPct=-1); without this call, the triple-check's quota leg
+	// (quotaUp) would be trivially true (any value > -1) and the safety
+	// invariant would degrade to a two-leg check. Spec §4.2 mandates both calls.
+	usage, err := f.Client.GetUsage(f.Creds)
+	if err != nil {
+		f.state = StateDONE
+		f.log("error", fmt.Sprintf("confirm usage failed: %v", err), "abandon", nil, nil)
+		return time.Time{}
+	}
+	snap.WeeklyPct = usage.WeeklyPct
 	target := avail[0]
 	f.attempt = ResetAttempt{
 		RedeemRequestID: uuid.NewString(),
@@ -267,4 +280,5 @@ func (f *AccountFSM) Reset() {
 	f.state = StateIDLE
 	f.attempt = ResetAttempt{}
 	f.verifyDue = time.Time{}
+	f.nextWake = time.Time{}
 }

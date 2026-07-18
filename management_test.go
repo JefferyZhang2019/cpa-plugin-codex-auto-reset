@@ -130,3 +130,17 @@ func TestManagement_ImportRejectsBadJSON(t *testing.T) {
 		t.Fatalf("status = %d, want 400", status)
 	}
 }
+
+func TestStatusHTML_ContainsBilingualMarkers(t *testing.T) {
+	h := newManagementHandlers(&PluginState{Config: DefaultConfig(), Accounts: map[string]AccountRuntime{}}, "", nil)
+	status, body := h.handle(http.MethodGet, "codex-auto-reset/resource/status", nil, nil)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+	html := string(body)
+	for _, want := range []string{"codex-auto-reset", "data-i18n", "EN", "ZH", "fetch(", "authorization"} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("HTML missing %q", want)
+		}
+	}
+}

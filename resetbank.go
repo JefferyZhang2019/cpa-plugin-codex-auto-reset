@@ -169,7 +169,7 @@ func (f *AccountFSM) stepIDLE() time.Time {
 		next := now.Add(f.Cfg.RefreshInterval)
 		f.nextWake = next
 		f.log("info",
-			fmt.Sprintf("credit %s expires in %s; not near trigger window (will arm %s before expiry)", shortID(target.ID), target.ExpiresAt.Sub(now).Round(time.Hour), f.Cfg.RefreshInterval),
+			fmt.Sprintf("credit %s expires in %s; not near trigger window (will arm %s before expiry point)", shortID(target.ID), target.ExpiresAt.Sub(now).Round(time.Hour), f.Cfg.RefreshInterval),
 			"patrol", &next,
 			map[string]any{"credit_id": target.ID, "expires_at": target.ExpiresAt})
 		return next

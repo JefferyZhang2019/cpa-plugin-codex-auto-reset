@@ -541,7 +541,7 @@ func renderStatusHTML(state *PluginState) string {
         const nextAt = a.next_wake || '';
         const displayName = escapeHTML(accountNameMap[id] || id);
 
-        // Credit list with per-credit remaining time + target marker.
+        // Credit list: YYMMDDHHMMSS expiry + remaining time + target marker.
         let creditListHtml = '';
         if (snap.credits && snap.credits.length > 0) {
           const sorted = snap.credits.slice().sort(function (x, y) {
@@ -549,9 +549,10 @@ func renderStatusHTML(state *PluginState) string {
             return xe.localeCompare(ye);
           });
           creditListHtml = sorted.map(function (c, idx) {
-            const remain = c.expires_at ? fmtRemain(c.expires_at) : t('neverExpires');
+            const expiryStr = c.expires_at ? fmtExpiryCompact(c.expires_at) : '—';
+            const remain = c.expires_at ? fmtRemainLocalized(c.expires_at) : t('neverExpires');
             const isTarget = idx === 0 ? ' <span class="muted" style="font-size:10px;">← target</span>' : '';
-            return '<div style="font-size:12px; padding-left:12px;">• ' + escapeHTML(c.id.substring(0, 24)) + '… ' + escapeHTML(remain) + isTarget + '</div>';
+            return '<div style="font-size:12px; padding-left:12px;">• <span class="muted">' + escapeHTML(expiryStr) + '</span> ' + escapeHTML(remain) + isTarget + '</div>';
           }).join('');
         } else {
           creditListHtml = '<div class="muted" style="font-size:12px; padding-left:12px;">—</div>';
@@ -572,9 +573,9 @@ func renderStatusHTML(state *PluginState) string {
           '</div>' +
           creditListHtml +
           (lastLogHtml ? '<div class="kv" style="margin-top:6px;">' + lastLogHtml + '</div>' : '') +
-          '<div class="next" style="margin-top:6px; font-size:12px; padding:6px 8px; border-radius:4px; background:color-mix(in srgb,#2563eb 6%,Canvas 94%);">' +
+          '<div class="next" style="margin-top:6px; font-size:12px; padding:6px 8px; border-radius:4px; background:color-mix(in srgb,#2563eb 6%,Canvas 94%);" data-next="' + escapeHTML(nextAt) + '">' +
           '<span class="k">' + escapeHTML(t('nextState')) + '</span> ' + escapeHTML(fmtTime(nextAt)) +
-          ' <span class="countdown muted" data-next="' + escapeHTML(nextAt) + '"></span></div>' +
+          ' <span class="countdown-text muted"></span></div>' +
           '<div class="actions" style="margin-top:8px;">' +
           '<button class="check-btn" data-auth="' + escapeHTML(id) + '">' + escapeHTML(t('check')) + '</button>' +
           '<button class="secondary reset-btn" data-auth="' + escapeHTML(id) + '">' + escapeHTML(t('reset')) + '</button>' +
@@ -597,6 +598,43 @@ func renderStatusHTML(state *PluginState) string {
       if (hours > 0) return hours + 'h' + (mins > 0 ? ' ' + mins + 'm' : '');
       return mins + 'm';
     }
+
+    // fmtExpiryCompact renders an ISO timestamp as YYMMDDHHMMSS (user's
+    // preferred format for credit expiry display).
+    function fmtExpiryCompact(iso) {
+      if (!iso || iso.startsWith('0001-')) return '—';
+      const d = new Date(iso);
+      if (isNaN(d)) return iso;
+      const yy = String(d.getFullYear()).slice(2);
+      const MM = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      const HH = String(d.getHours()).padStart(2, '0');
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      const ss = String(d.getSeconds()).padStart(2, '0');
+      return yy + MM + dd + HH + mm + ss;
+    }
+
+    // fmtRemainLocalized renders remaining time in the selected language:
+    // ZH: "8天9小时", EN: "8d 9h".
+    function fmtRemainLocalized(iso) {
+      if (!iso || iso.startsWith('0001-')) return t('neverExpires');
+      const d = new Date(iso);
+      if (isNaN(d)) return iso;
+      const ms = d - Date.now();
+      if (ms <= 0) return t('expired');
+      const days = Math.floor(ms / 86400000);
+      const hours = Math.floor((ms % 86400000) / 3600000);
+      const mins = Math.floor((ms % 3600000) / 60000);
+      const zh = document.getElementById('locale').value === 'zh';
+      const dayUnit = zh ? '天' : 'd';
+      const hourUnit = zh ? '小时' : 'h';
+      const minUnit = zh ? '分' : 'm';
+      const parts = [];
+      if (days > 0) parts.push(days + dayUnit);
+      if (hours > 0) parts.push(hours + hourUnit);
+      if (days === 0 && hours === 0 && mins > 0) parts.push(mins + minUnit);
+      return parts.join(zh ? '' : ' ') || (zh ? '不到1分' : '<1m');
+    }
     // translateLog converts an English FSM log message to the selected UI
     // language. Uses regex replacements for the common patterns so the
     // dynamic parts (credit IDs, durations, counts) are preserved.
@@ -610,7 +648,7 @@ func renderStatusHTML(state *PluginState) string {
       let z = msg;
       const rules = [
         [/no available credits/g, '未发现可用重置次数'],
-        [/credit ([a-f0-9…]*) expires in ([^;]+); not near trigger window \(will arm ([^)]+\))/g,
+        [/credit ([a-f0-9…]*) expires in ([^;]+); not near trigger window \(will arm ([^)]+) before expiry[^)]*\)/g,
          '重置次数 $1 将在 $2 后过期；尚未进入触发窗口（将在过期前 $3 进入 ARMED）'],
         [/credit ([a-f0-9…]*) expires in ([^;]+); not near trigger window.*/g,
          '重置次数 $1 将在 $2 后过期；尚未进入触发窗口'],
@@ -736,9 +774,9 @@ func renderStatusHTML(state *PluginState) string {
       });
       applyI18n();
       setInterval(function () {
-        for (const el of document.querySelectorAll('[data-next]')) {
+        for (const el of document.querySelectorAll('.next[data-next]')) {
           const c = countdown(el.dataset.next || '');
-          const span = el.querySelector('.countdown');
+          const span = el.querySelector('.countdown-text');
           if (span) span.textContent = c ? '(' + c + ')' : '';
         }
       }, 1000);

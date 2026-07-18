@@ -13,7 +13,7 @@ coverage.out
 *.prof
 
 # Local plugin state
-codex-quota-scheduler.state.json
+codex-auto-reset.state.json
 *.annotations.json
 
 # Editor and OS files

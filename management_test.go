@@ -24,7 +24,7 @@ func newTestManagement(t *testing.T, cfg Config, enabled []string) *testMgmtHelp
 
 func (m *testMgmtHelper) get(t *testing.T, path string) []byte {
 	t.Helper()
-	status, body := m.h.handle(http.MethodGet, stripPrefix(path), nil, nil)
+	status, body, _ := m.h.handle(http.MethodGet, path, nil, nil)
 	if status >= 400 {
 		t.Fatalf("GET %s: status %d body %s", path, status, body)
 	}
@@ -33,7 +33,7 @@ func (m *testMgmtHelper) get(t *testing.T, path string) []byte {
 
 func (m *testMgmtHelper) put(t *testing.T, path string, b []byte) []byte {
 	t.Helper()
-	status, body := m.h.handle(http.MethodPut, stripPrefix(path), nil, b)
+	status, body, _ := m.h.handle(http.MethodPut, path, nil, b)
 	if status >= 400 {
 		t.Fatalf("PUT %s: status %d body %s", path, status, body)
 	}
@@ -42,16 +42,11 @@ func (m *testMgmtHelper) put(t *testing.T, path string, b []byte) []byte {
 
 func (m *testMgmtHelper) post(t *testing.T, path string, b []byte) []byte {
 	t.Helper()
-	status, body := m.h.handle(http.MethodPost, stripPrefix(path), nil, b)
+	status, body, _ := m.h.handle(http.MethodPost, path, nil, b)
 	if status >= 400 {
 		t.Fatalf("POST %s: status %d body %s", path, status, body)
 	}
 	return body
-}
-
-func stripPrefix(path string) string {
-	const pfx = "/v0/management/plugins/codex-auto-reset"
-	return strings.TrimPrefix(path, pfx)
 }
 
 func TestManagement_StatusRoute(t *testing.T) {
@@ -105,7 +100,7 @@ func TestManagement_PutSettingsUpdatesAndPersists(t *testing.T) {
 
 func TestManagement_UnknownRouteReturns404(t *testing.T) {
 	srv := newTestManagement(t, DefaultConfig(), nil)
-	status, _ := srv.h.handle(http.MethodGet, "/codex-auto-reset/nonexistent", nil, nil)
+	status, _, _ := srv.h.handle(http.MethodGet, "/codex-auto-reset/nonexistent", nil, nil)
 	if status != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", status)
 	}
@@ -125,17 +120,23 @@ func TestManagement_ImportExportRoundTrip(t *testing.T) {
 
 func TestManagement_ImportRejectsBadJSON(t *testing.T) {
 	srv := newTestManagement(t, DefaultConfig(), nil)
-	status, _ := srv.h.handle(http.MethodPost, "/codex-auto-reset/import", nil, []byte(`{bad json`))
+	status, _, _ := srv.h.handle(http.MethodPost, "/codex-auto-reset/import", nil, []byte(`{bad json`))
 	if status != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", status)
 	}
 }
 
-func TestStatusHTML_ContainsBilingualMarkers(t *testing.T) {
+func TestStatusHTML_ResourcePathReturnsHTML(t *testing.T) {
+	// The browser resource path (/v0/resource/plugins/codex-auto-reset/status)
+	// must return the HTML page, NOT JSON. Regression guard for the bug where
+	// management.html loaded the resource URL and got raw JSON instead of the UI.
 	h := newManagementHandlers(&PluginState{Config: DefaultConfig(), Accounts: map[string]AccountRuntime{}}, "", nil)
-	status, body := h.handle(http.MethodGet, "codex-auto-reset/resource/status", nil, nil)
+	status, body, contentType := h.handle(http.MethodGet, "/v0/resource/plugins/codex-auto-reset/status", nil, nil)
 	if status != http.StatusOK {
 		t.Fatalf("status = %d", status)
+	}
+	if !strings.HasPrefix(contentType, "text/html") {
+		t.Fatalf("resource /status must return HTML, got Content-Type %q (body starts: %s)", contentType, truncate(body, 80))
 	}
 	html := string(body)
 	for _, want := range []string{"codex-auto-reset", "data-i18n", "EN", "ZH", "fetch(", "authorization"} {
@@ -143,4 +144,27 @@ func TestStatusHTML_ContainsBilingualMarkers(t *testing.T) {
 			t.Fatalf("HTML missing %q", want)
 		}
 	}
+}
+
+func TestStatus_ManagementPathReturnsJSON(t *testing.T) {
+	// The management path (/v0/management/plugins/codex-auto-reset/status)
+	// must return JSON for the JS frontend, NOT the HTML page.
+	srv := newTestManagement(t, Config{RefreshInterval: 12 * time.Hour, TriggerLeadTime: 6 * time.Hour, EnabledAccounts: []string{"a"}}, []string{"a"})
+	status, body, contentType := srv.h.handle(http.MethodGet, "/v0/management/plugins/codex-auto-reset/status", nil, nil)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+	if !strings.HasPrefix(contentType, "application/json") {
+		t.Fatalf("management /status must return JSON, got Content-Type %q", contentType)
+	}
+	if !strings.HasPrefix(string(body), "{") {
+		t.Fatalf("expected JSON body, got: %s", truncate(body, 80))
+	}
+}
+
+func truncate(b []byte, n int) string {
+	if len(b) <= n {
+		return string(b)
+	}
+	return string(b[:n]) + "..."
 }

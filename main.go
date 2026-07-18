@@ -349,7 +349,6 @@ func managementRegistrationResponse() pluginapi.ManagementRegistrationResponse {
 		{Method: http.MethodPost, Path: "/codex-auto-reset/reset"},
 		{Method: http.MethodGet, Path: "/codex-auto-reset/export"},
 		{Method: http.MethodPost, Path: "/codex-auto-reset/import"},
-		{Method: http.MethodGet, Path: "/codex-auto-reset/resource/status"},
 	}
 	return pluginapi.ManagementRegistrationResponse{Routes: routes, Resources: resources}
 }
@@ -366,11 +365,7 @@ func handleManagementRequest(raw []byte) pluginapi.ManagementResponse {
 	if h == nil {
 		return mgmtJSONResponse(http.StatusServiceUnavailable, map[string]any{"error": "plugin not configured"})
 	}
-	status, body := h.handle(req.Method, req.Path, req.Headers, req.Body)
-	contentType := "application/json"
-	if strings.Contains(req.Path, "resource/status") {
-		contentType = "text/html; charset=utf-8"
-	}
+	status, body, contentType := h.handle(req.Method, req.Path, req.Headers, req.Body)
 	return pluginapi.ManagementResponse{
 		StatusCode: status,
 		Headers:    http.Header{"Content-Type": []string{contentType}},

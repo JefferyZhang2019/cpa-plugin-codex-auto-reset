@@ -24,40 +24,84 @@ func newManagementHandlers(state *PluginState, statePath string, worker *Worker)
 	return &managementHandlers{state: state, statePath: statePath, worker: worker}
 }
 
-// handle dispatches one management request. path may carry either the full
-// /v0/management/plugins/codex-auto-reset prefix, the bare codex-auto-reset
-// segment, or already be stripped (tests pass various forms). We locate the
-// plugin ID segment and route on whatever follows it. Returns (HTTP status,
-// response body bytes).
-func (h *managementHandlers) handle(method, path string, headers http.Header, body []byte) (int, []byte) {
-	if idx := strings.LastIndex(path, pluginID); idx >= 0 {
-		path = path[idx+len(pluginID):]
-	}
-	path = strings.Trim(path, "/")
+// resourceBasePath is the URL prefix under which CPA serves browser-navigable
+// plugin resources. Requests whose Path starts with this prefix are resource
+// loads (HTML page); all others are Management API calls (JSON).
+const resourceBasePath = "/v0/resource/plugins/" + pluginID
+
+// isResourcePath reports whether the raw request path targets the browser-
+// navigable resource surface (returns HTML) rather than the Management API
+// (returns JSON). Pattern matches the scheduler plugin's isResourcePath.
+func isResourcePath(path string) bool {
+	return path == resourceBasePath || strings.HasPrefix(path, resourceBasePath+"/")
+}
+
+// handle dispatches one management or resource request. rawPath is the
+// original CPA request path (e.g. /v0/management/plugins/codex-auto-reset/
+// status or /v0/resource/plugins/codex-auto-reset/status); it is used to
+// distinguish HTML (resource) from JSON (management) responses for /status.
+func (h *managementHandlers) handle(method, rawPath string, headers http.Header, body []byte) (int, []byte, string) {
+	path := normalizePath(rawPath)
 	switch {
-	case method == http.MethodGet && path == "status":
-		return h.statusJSON()
-	case method == http.MethodGet && path == "logs":
-		return h.logsJSON()
-	case method == http.MethodPut && path == "settings":
-		return h.putSettings(body)
-	case method == http.MethodPost && path == "check":
-		return h.checkOne(body)
-	case method == http.MethodPost && path == "check/all":
+	case method == http.MethodGet && path == "/status":
+		// Same path serves HTML (resource load) or JSON (management API).
+		if isResourcePath(rawPath) {
+			return http.StatusOK, []byte(renderStatusHTML(h.state)), "text/html; charset=utf-8"
+		}
+		st, b := h.statusJSON()
+		return st, b, "application/json"
+	case method == http.MethodGet && path == "/logs":
+		st, b := h.logsJSON()
+		return st, b, "application/json"
+	case method == http.MethodPut && path == "/settings":
+		st, b := h.putSettings(body)
+		return st, b, "application/json"
+	case method == http.MethodPost && path == "/check":
+		st, b := h.checkOne(body)
+		return st, b, "application/json"
+	case method == http.MethodPost && path == "/check/all":
 		if h.worker != nil {
 			h.worker.TriggerCheck("")
 		}
-		return jsonOK(map[string]any{"triggered": "all"})
-	case method == http.MethodPost && path == "reset":
-		return h.resetOne(body)
-	case method == http.MethodGet && path == "export":
-		return h.exportState()
-	case method == http.MethodPost && path == "import":
-		return h.importState(body)
-	case method == http.MethodGet && (path == "resource/status" || path == "codex-auto-reset/resource/status"):
-		return http.StatusOK, []byte(renderStatusHTML(h.state))
+		st, b := jsonOK(map[string]any{"triggered": "all"})
+		return st, b, "application/json"
+	case method == http.MethodPost && path == "/reset":
+		st, b := h.resetOne(body)
+		return st, b, "application/json"
+	case method == http.MethodGet && path == "/export":
+		st, b := h.exportState()
+		return st, b, "application/json"
+	case method == http.MethodPost && path == "/import":
+		st, b := h.importState(body)
+		return st, b, "application/json"
 	}
-	return jsonStatus(http.StatusNotFound, map[string]any{"error": "route not found"})
+	st, b := jsonStatus(http.StatusNotFound, map[string]any{"error": "route not found"})
+	return st, b, "application/json"
+}
+
+// normalizePath strips every CPA-known prefix from a management or resource
+// path so dispatch can switch on a canonical suffix (e.g. "/status",
+// "/settings"). Both /v0/management/plugins/codex-auto-reset/status and
+// /v0/resource/plugins/codex-auto-reset/status normalize to /status.
+// A bare "/codex-auto-reset/status" (without the /v0/... prefix) is also
+// accepted for resilience.
+func normalizePath(path string) string {
+	for _, prefix := range []string{
+		"/v0/management/plugins/" + pluginID,
+		"/v0/resource/plugins/" + pluginID,
+		"/plugins/" + pluginID,
+		"/" + pluginID,
+		pluginID,
+	} {
+		if strings.HasPrefix(path, prefix) {
+			stripped := strings.TrimPrefix(path, prefix)
+			if stripped == "" || stripped == "/" {
+				return "/"
+			}
+			return stripped
+		}
+	}
+	return path
 }
 
 func (h *managementHandlers) statusJSON() (int, []byte) {

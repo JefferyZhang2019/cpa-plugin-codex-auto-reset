@@ -123,7 +123,10 @@ func TestCardSimulation_AllStates(t *testing.T) {
 	clock3 := &simClock{t: E.Add(-1 * time.Hour)}
 	fsm3 := NewAccountFSM("codex-ac9ce24f-carol@example.com-team.json", CodexCredentials{AccessToken: "tok"}, cfg, fc3, clock3.Now, logf)
 	fsm3.ForceState(StateCONFIRMING)
-	stepAndPrintCard(t, fsm3, clock3, fc3, "场景5: no_credit 停止")
+	// Drive: CONFIRMING → RESETTING (POST, no_credit) → DONE → Reset → IDLE
+	for i := 0; i < 5 && fsm3.State() != StateIDLE; i++ {
+		stepAndPrintCard(t, fsm3, clock3, fc3, fmt.Sprintf("场景5 步骤%d", i+1))
+	}
 
 	// ============================================================
 	// SCENARIO 6: no available credits at all
@@ -213,6 +216,15 @@ func stepAndPrintCard(t *testing.T, fsm *AccountFSM, clock *simClock, fc ResetCl
 	newState := fsm.State()
 	snap := fsm.LastSnapshot()
 
+	// Simulate worker behavior: when FSM reaches DONE, worker calls Reset()
+	// and schedules nextWake = now + refresh_interval, so it resumes patrol.
+	if newState == StateDONE {
+		fsm.Reset()
+		next = clock.t.Add(12 * time.Hour) // cfg.RefreshInterval
+		fsm.SetNextWake(next)
+		newState = fsm.State() // now IDLE
+	}
+
 	t.Log("")
 	t.Log("┌──────────────────────────────────────────────────────────────────┐")
 	t.Logf("│ %s", label)
@@ -244,19 +256,33 @@ func stepAndPrintCard(t *testing.T, fsm *AccountFSM, clock *simClock, fc ResetCl
 		t.Logf("│   • %s  %s  剩余 %v", shortID, expiryStr, remain)
 	}
 
-	// Status panel: last + next in one box
-	t.Log("├──────────────────────────────────────────────────────────────────┤")
-	t.Logf("│ ● 上一轮: %s", truncateSim(describeSimTransition(fromState, newState), 56))
+	// Status panel: last + next in one box.
+	// If FSM just came from DONE (via Reset), the "last" message should
+	// describe the cycle result, not the post-reset IDLE state.
+	lastMsg := describeSimTransition(fromState, newState)
+	// If we reset from DONE, the fromState was DONE but we want to show what
+	// happened in the cycle. Check the logs for the most recent DONE entry.
+	if fromState == StateDONE || (fromState != StateIDLE && newState == StateIDLE) {
+		// Already handled by describeSimTransition
+	}
 
 	nextStr := "等待调度"
 	if !next.IsZero() {
 		nextStr = fmt.Sprintf("下一轮将在 %s 发生（%s）", next.Format("2006-01-02 15:04:05"), describeSimAction(newState))
 	}
+
+	t.Log("├──────────────────────────────────────────────────────────────────┤")
+	t.Logf("│ ● 上一轮: %s", truncateSim(lastMsg, 56))
 	t.Logf("│ ● %s", nextStr)
 	t.Log("└──────────────────────────────────────────────────────────────────┘")
 }
 
 func describeSimTransition(from, to State) string {
+	// Special case: DONE → IDLE (worker Reset). The "last" message should
+	// describe the cycle outcome.
+	if to == StateIDLE && from != StateIDLE && from != StateARMED {
+		return describeSimOutcome(from)
+	}
 	switch to {
 	case StateIDLE:
 		return "巡查完毕，未发现临近过期的重置次数"
@@ -272,6 +298,22 @@ func describeSimTransition(from, to State) string {
 		return "重置验证通过，本轮完成"
 	}
 	return string(to)
+}
+
+// describeSimOutcome describes what happened when a cycle ended and the FSM
+// was Reset back to IDLE by the worker. The from state tells us the outcome:
+// DONE = completed (success/abandoned), VERIFYING = verified, etc.
+func describeSimOutcome(from State) string {
+	switch from {
+	case StateDONE:
+		return "重置流程已结束，恢复巡查"
+	case StateVERIFYING:
+		return "重置验证通过，恢复巡查"
+	case StateRESETTING:
+		return "重置已停止（服务端拒绝或网络错误），恢复巡查"
+	default:
+		return "本轮结束，恢复巡查"
+	}
 }
 
 func describeSimAction(state State) string {

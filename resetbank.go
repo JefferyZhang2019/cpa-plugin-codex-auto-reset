@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -149,6 +150,12 @@ func (f *AccountFSM) stepIDLE() time.Time {
 		return next
 	}
 	f.lastSnapshot = snap // mirror into the UI-facing snapshot
+	// Also fetch weekly % so the UI card can display it. The /rate-limit-
+	// reset-credits endpoint doesn't return weekly %, so we need /usage.
+	if usage, err := f.Client.GetUsage(f.Creds); err == nil {
+		snap.WeeklyPct = usage.WeeklyPct
+		f.lastSnapshot = snap
+	}
 	avail := availableCreditsSorted(snap.Credits, now)
 	if len(avail) == 0 {
 		next := now.Add(f.Cfg.RefreshInterval)
@@ -162,7 +169,7 @@ func (f *AccountFSM) stepIDLE() time.Time {
 		next := now.Add(f.Cfg.RefreshInterval)
 		f.nextWake = next
 		f.log("info",
-			fmt.Sprintf("credit %s not near trigger window (M=%s)", target.ID, M.Format(time.RFC3339)),
+			fmt.Sprintf("credit %s expires in %s; not near trigger window (will arm %s before expiry)", shortID(target.ID), target.ExpiresAt.Sub(now).Round(time.Hour), f.Cfg.RefreshInterval),
 			"patrol", &next,
 			map[string]any{"credit_id": target.ID, "expires_at": target.ExpiresAt})
 		return next
@@ -177,8 +184,8 @@ func (f *AccountFSM) stepIDLE() time.Time {
 	}
 	f.nextWake = wake
 	f.log("warn",
-		fmt.Sprintf("credit %s armed; trigger window T=%s", target.ID, T.Format(time.RFC3339)),
-		"sleep to T then confirm", &wake,
+		fmt.Sprintf("credit %s armed; will reset at %s (expiry in %s)", shortID(target.ID), T.Format("15:04:05"), target.ExpiresAt.Sub(now).Round(time.Minute)),
+		"sleep to trigger time", &wake,
 		map[string]any{"credit_id": target.ID, "T": T})
 	return wake
 }
@@ -187,7 +194,7 @@ func (f *AccountFSM) stepARMED() time.Time {
 	// ARMED only sleeps to T; the wake has happened. Proceed to CONFIRMING.
 	// Zero extra GETs in this state (revised design).
 	f.state = StateCONFIRMING
-	f.log("info", "armed wake at T, confirming", "send POST /consume", nil, nil)
+	f.log("info", "trigger time reached, confirming before reset", "send reset request", nil, nil)
 	return f.now() // re-enter immediately
 }
 
@@ -227,8 +234,8 @@ func (f *AccountFSM) stepCONFIRMING() time.Time {
 	}
 	f.state = StateRESETTING
 	f.log("info",
-		fmt.Sprintf("confirmed target=%s, pre weekly=%d%%, redeem_id=%s", target.ID, snap.WeeklyPct, f.attempt.RedeemRequestID),
-		"send POST /consume", nil,
+		fmt.Sprintf("confirmed target credit %s (weekly was %d%%); sending reset request", shortID(target.ID), snap.WeeklyPct),
+		"send reset request", nil,
 		map[string]any{"credit_id": target.ID})
 	return f.now()
 }
@@ -242,23 +249,20 @@ func (f *AccountFSM) stepRESETTING() time.Time {
 		f.verifyDue = now.Add(postResetVerifyDelay)
 		f.nextWake = f.verifyDue
 		f.log("info",
-			fmt.Sprintf("consume ok code=%s windows_reset=%d", resp.Code, resp.WindowsReset),
+			fmt.Sprintf("reset request accepted (code=%s, windows_reset=%d); will verify in %v", resp.Code, resp.WindowsReset, postResetVerifyDelay),
 			fmt.Sprintf("verify in %v", postResetVerifyDelay), &f.verifyDue,
 			map[string]any{"redeem_request_id": f.attempt.RedeemRequestID, "credit_id": f.attempt.TargetCreditID})
 		return f.verifyDue
 	case decisionStop:
 		f.state = StateDONE
-		msg := fmt.Sprintf("consume returned %s", resp.Code)
+		msg := fmt.Sprintf("reset stopped: server returned %s", resp.Code)
 		if err != nil {
-			msg = fmt.Sprintf("consume error (hard stop): %v", err)
+			msg = fmt.Sprintf("reset stopped: %v", err)
 		}
 		f.log("warn", msg, "abandon", nil, map[string]any{"redeem_request_id": f.attempt.RedeemRequestID})
 		return time.Time{}
 	case decisionRetry:
 		f.attempt.Attempt++
-		// spec §5.2: at most 5 retries (so 6 total attempts including the
-		// initial). The Nth retry uses resetRetryDelays[N-1]; we cap the
-		// attempt count here so backoffForAttempt always indexes in range.
 		if f.attempt.Attempt > len(resetRetryDelays) {
 			f.state = StateDONE
 			f.log("error",
@@ -271,8 +275,8 @@ func (f *AccountFSM) stepRESETTING() time.Time {
 		f.attempt.NextRetryAt = now.Add(backoff)
 		f.nextWake = f.attempt.NextRetryAt
 		f.log("warn",
-			fmt.Sprintf("consume failed (attempt %d): %v; will retry with same UUID", f.attempt.Attempt, err),
-			fmt.Sprintf("retry in %v (same redeem_request_id)", backoff), &f.attempt.NextRetryAt,
+			fmt.Sprintf("reset failed (attempt %d): %v; retrying with same idempotency key", f.attempt.Attempt, err),
+			fmt.Sprintf("retry in %v", backoff), &f.attempt.NextRetryAt,
 			map[string]any{"redeem_request_id": f.attempt.RedeemRequestID, "attempt": f.attempt.Attempt})
 		return f.attempt.NextRetryAt
 	}
@@ -283,13 +287,13 @@ func (f *AccountFSM) stepVERIFYING() time.Time {
 	credits, err := f.Client.ListCredits(f.Creds)
 	if err != nil {
 		f.state = StateDONE
-		f.log("error", fmt.Sprintf("verify list failed: %v", err), "abandon", nil, nil)
+		f.log("error", fmt.Sprintf("verification failed: %v", err), "abandon", nil, nil)
 		return time.Time{}
 	}
 	usage, err := f.Client.GetUsage(f.Creds)
 	if err != nil {
 		f.state = StateDONE
-		f.log("error", fmt.Sprintf("verify usage failed: %v", err), "abandon", nil, nil)
+		f.log("error", fmt.Sprintf("verification failed: %v", err), "abandon", nil, nil)
 		return time.Time{}
 	}
 	// Triple deduction check (spec §4.3 invariant 3). Mirrors sim/engine.go's
@@ -309,15 +313,15 @@ func (f *AccountFSM) stepVERIFYING() time.Time {
 	switch {
 	case targetGone && countDown1 && quotaUp:
 		f.log("info",
-			fmt.Sprintf("verify OK: count %d->%d, weekly %d%%->%d%%", f.attempt.PreSnapshot.AvailableCount, credits.AvailableCount, f.attempt.PreSnapshot.WeeklyPct, usage.WeeklyPct),
+			fmt.Sprintf("reset verified: credits %d→%d, weekly %d%%→%d%%", f.attempt.PreSnapshot.AvailableCount, credits.AvailableCount, f.attempt.PreSnapshot.WeeklyPct, usage.WeeklyPct),
 			"cycle complete", nil, map[string]any{"credit_id": f.attempt.TargetCreditID})
 	case targetGone && countDown1:
 		f.log("warn",
-			fmt.Sprintf("verify PARTIAL: count ok but weekly %d%%->%d%% (delayed reset?)", f.attempt.PreSnapshot.WeeklyPct, usage.WeeklyPct),
+			fmt.Sprintf("reset partial: credits ok but weekly %d%%→%d%% (delayed?)", f.attempt.PreSnapshot.WeeklyPct, usage.WeeklyPct),
 			"cycle complete", nil, nil)
 	default:
 		f.log("error",
-			fmt.Sprintf("verify MISMATCH: targetGone=%v countDown1=%v quotaUp=%v — halting, no compensating request", targetGone, countDown1, quotaUp),
+			fmt.Sprintf("verification mismatch: target gone=%v, count-1=%v, quota up=%v — halted", targetGone, countDown1, quotaUp),
 			"abandon", nil,
 			map[string]any{"redeem_request_id": f.attempt.RedeemRequestID, "target_credit_id": f.attempt.TargetCreditID})
 	}
@@ -333,4 +337,15 @@ func (f *AccountFSM) Reset() {
 	f.attempt = ResetAttempt{}
 	f.verifyDue = time.Time{}
 	f.nextWake = time.Time{}
+}
+
+// shortID truncates a long credit/redeem ID for readable log messages.
+// "RateLimitResetCredit_d7087f83469c819182a87d5916512c9c" -> "d7087f83…"
+func shortID(id string) string {
+	const prefix = "RateLimitResetCredit_"
+	s := strings.TrimPrefix(id, prefix)
+	if len(s) > 10 {
+		return s[:8] + "…"
+	}
+	return s
 }

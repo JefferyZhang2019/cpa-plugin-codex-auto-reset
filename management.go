@@ -560,7 +560,7 @@ func renderStatusHTML(state *PluginState) string {
         // Last log line for this account.
         const lastLog = lastLogByScope[id];
         const lastLogHtml = lastLog
-          ? '<span class="k">' + escapeHTML(t('lastCycle')) + '</span><span style="font-size:11px;">' + escapeHTML(lastLog.message) + '</span>'
+          ? '<span class="k">' + escapeHTML(t('lastCycle')) + '</span><span style="font-size:11px;">' + escapeHTML(translateLog(lastLog.message)) + '</span>'
           : '';
 
         return '<div class="card">' +
@@ -597,16 +597,65 @@ func renderStatusHTML(state *PluginState) string {
       if (hours > 0) return hours + 'h' + (mins > 0 ? ' ' + mins + 'm' : '');
       return mins + 'm';
     }
+    // translateLog converts an English FSM log message to the selected UI
+    // language. Uses regex replacements for the common patterns so the
+    // dynamic parts (credit IDs, durations, counts) are preserved.
+    function translateLog(msg) {
+      if (document.getElementById('locale').value !== 'zh') return msg;
+      // State names
+      const stateMap = {
+        'IDLE': 'IDLE', 'ARMED': 'ARMED', 'CONFIRMING': 'CONFIRMING',
+        'RESETTING': 'RESETTING', 'VERIFYING': 'VERIFYING', 'DONE': 'DONE'
+      };
+      let z = msg;
+      const rules = [
+        [/no available credits/g, '未发现可用重置次数'],
+        [/credit ([a-f0-9…]*) expires in ([^;]+); not near trigger window \(will arm ([^)]+\))/g,
+         '重置次数 $1 将在 $2 后过期；尚未进入触发窗口（将在过期前 $3 进入 ARMED）'],
+        [/credit ([a-f0-9…]*) expires in ([^;]+); not near trigger window.*/g,
+         '重置次数 $1 将在 $2 后过期；尚未进入触发窗口'],
+        [/credit ([a-f0-9…]*) armed; will reset at ([^ ]+) \(expiry in ([^)]+)\)/g,
+         '重置次数 $1 已进入 ARMED；将在 $2 触发重置（过期前还有 $3）'],
+        [/trigger time reached, confirming before reset/g, '触发时间已到，正在确认后重置'],
+        [/confirmed target credit ([a-f0-9…]*) \(weekly was (\d+%%)\); sending reset request/g,
+         '已确认目标重置次数 $1（周额度 $2）；正在发送重置请求'],
+        [/reset request accepted \(code=([^,]+), windows_reset=(\d+)\); will verify in ([^)]+)/g,
+         '重置请求已接受（code=$1，重置窗口=$2）；$3 后验证'],
+        [/reset stopped: server returned (.+)/g, '重置已停止：服务端返回 $1'],
+        [/reset stopped: (.+)/g, '重置已停止：$1'],
+        [/reset failed \(attempt (\d+)\): (.+); retrying with same idempotency key/g,
+         '重置失败（第 $1 次）：$2；使用相同幂等键重试'],
+        [/retries exhausted after (\d+) attempts; last error: (.+)/g,
+         '重试 $1 次后放弃；最后错误：$2'],
+        [/reset verified: credits (\d+)→(\d+), weekly (\d+%%)→(\d+%%)/g,
+         '重置验证通过：重置次数 $1→$2，周额度 $3→$4'],
+        [/reset partial: credits ok but weekly (\d+%%)→(\d+%%) \(delayed\?\)/g,
+         '重置部分完成：次数已扣但周额度 $1→$2（延迟？）'],
+        [/verification mismatch: target gone=(\w+), count-1=(\w+), quota up=(\w+) — halted/g,
+         '验证不匹配：目标已扣=$1，次数-1=$2，额度回升=$3 —— 已停止'],
+        [/verification failed: (.+)/g, '验证失败：$1'],
+        [/target credit vanished before reset/g, '目标重置次数在重置前已消失'],
+        [/armed wake at T, confirming/g, '触发时间已到，正在确认'],
+      ];
+      for (const r of rules) {
+        z = z.replace(r[0], r[1]);
+      }
+      return z;
+    }
+
     function renderLogs(entries) {
       const box = document.getElementById('logs');
       const list = entries || [];
       if (list.length === 0) { box.innerHTML = '<span class="muted">-</span>'; return; }
       box.innerHTML = list.slice(-100).reverse().map(function (e) {
         const lvl = (e.level || 'info').toUpperCase();
+        const scope = accountNameMap[e.scope] || e.scope || '';
+        const state = e.state || '';
+        const msg = translateLog(e.message || '');
         return '<div class="line"><span class="ts">[' + escapeHTML(fmtTime(e.timestamp)) + ']</span> ' +
           '<span class="lvl-' + escapeHTML(e.level || 'info') + '">' + escapeHTML(lvl) + '</span> ' +
-          '<span>[' + escapeHTML(e.scope || '') + '/' + escapeHTML(e.state || '') + ']</span> ' +
-          escapeHTML(e.message) + '</div>';
+          '<span class="muted">[' + escapeHTML(scope) + '/' + escapeHTML(state) + ']</span> ' +
+          escapeHTML(msg) + '</div>';
       }).join('');
     }
     // accountNameMap caches auth_index -> human-readable name from /accounts,

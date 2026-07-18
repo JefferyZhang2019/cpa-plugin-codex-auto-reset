@@ -357,8 +357,8 @@ func TestFSM_WrongCreditConsumed_DetectsMismatch(t *testing.T) {
 	}
 	// The mismatch must be logged.
 	joined := strings.Join(logs, "\n")
-	if !strings.Contains(joined, "MISMATCH") {
-		t.Fatalf("expected MISMATCH in logs, got:\n%s", joined)
+	if !strings.Contains(strings.ToLower(joined), "mismatch") {
+		t.Fatalf("expected mismatch in logs, got:\n%s", joined)
 	}
 	// Sooner must still be available (server never actually consumed it).
 	if c := fc.credits["sooner"]; c.Status != "available" {

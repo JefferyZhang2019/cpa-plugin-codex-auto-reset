@@ -18,8 +18,8 @@ type AccountLister func() ([]AccountOption, error)
 // AccountOption is one selectable Codex account for the UI's checkbox list.
 type AccountOption struct {
 	AuthIndex string `json:"auth_index"`
-	Name      string `json:"name"`              // full credential file name (e.g. codex-teamID-email-team.json)
-	Label     string `json:"label"`             // human-readable display label (name, then email, then auth_index)
+	ID        string `json:"id,omitempty"`  // credential ID / file name (e.g. codex-44411af1-email-team.json)
+	Name      string `json:"name"`          // human-readable display label (id, then name, then email, then auth_index)
 	Email     string `json:"email,omitempty"`
 	Account   string `json:"account,omitempty"` // ChatGPT account ID
 	Enabled   bool   `json:"enabled"`           // true if currently in EnabledAccounts
@@ -542,7 +542,7 @@ func renderStatusHTML(state *PluginState) string {
           }
         }
         return '<div class="card">' +
-          '<div class="card-head"><span class="auth-id">' + escapeHTML(id) + '</span>' +
+          '<div class="card-head"><span class="auth-id">' + escapeHTML(accountNameMap[id] || id) + '</span>' +
           '<span class="state-badge ' + escapeHTML(state) + '">' + escapeHTML(state) + '</span></div>' +
           '<div class="kv">' +
           '<span class="k">' + escapeHTML(t('creditsAvail')) + '</span><span>' + escapeHTML(String(credits)) + '</span>' +
@@ -569,6 +569,11 @@ func renderStatusHTML(state *PluginState) string {
           escapeHTML(e.message) + '</div>';
       }).join('');
     }
+    // accountNameMap caches auth_index -> human-readable name from /accounts,
+    // so the right-panel cards can show "codex-44411af1-…-team.json" instead
+    // of the raw hex auth_index.
+    var accountNameMap = {};
+
     async function loadStatus() {
       try {
         const results = await Promise.all([
@@ -577,6 +582,11 @@ func renderStatusHTML(state *PluginState) string {
           apiGet('/v0/management/plugins/codex-auto-reset/accounts').catch(function () { return { accounts: [] }; }),
         ]);
         const status = results[0], logsResp = results[1], acctsResp = results[2];
+        // Build the name cache from /accounts.
+        accountNameMap = {};
+        (acctsResp.accounts || []).forEach(function (a) {
+          accountNameMap[a.auth_index] = a.name || a.email || a.auth_index;
+        });
         renderAccounts(status);
         renderLogs(logsResp.entries || []);
         const c = status.config || {};
@@ -593,23 +603,11 @@ func renderStatusHTML(state *PluginState) string {
       }
       box.innerHTML = accts.map(function (a) {
         var checked = a.enabled ? ' checked' : '';
-        // Build the most informative label available. Prefer the full file
-        // Name; if empty (some CPA builds don't populate it), show email plus
-        // the short auth_index so duplicate emails are distinguishable.
-        var primary, detail;
-        if (a.name) {
-          primary = escapeHTML(a.name);
-          detail = a.account ? ' <span class="muted" style="font-size:11px;">(' + escapeHTML(a.account) + ')</span>' : '';
-        } else {
-          primary = escapeHTML(a.email || a.label || a.auth_index);
-          // Always show the auth_index short form so accounts with the same
-          // email are distinguishable in the checkbox list.
-          var shortIdx = a.auth_index ? a.auth_index.substring(0, 12) : '';
-          detail = ' <span class="muted" style="font-size:11px;">[' + escapeHTML(shortIdx) + '…]</span>';
-        }
+        // a.name is already the most informative label (ID/file name preferred).
+        var label = escapeHTML(a.name || a.email || a.auth_index);
         return '<label style="display:flex; align-items:center; gap:8px; font-size:13px; font-weight:500;">' +
                '<input type="checkbox" class="acct-checkbox" value="' + escapeHTML(a.auth_index) + '"' + checked + ' style="width:auto; margin:0;">' +
-               '<span>' + primary + detail + '</span></label>';
+               '<span>' + label + '</span></label>';
       }).join('');
     }
     function getEnabledAccounts() {

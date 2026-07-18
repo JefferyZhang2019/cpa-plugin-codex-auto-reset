@@ -371,11 +371,12 @@ func listCodexAccountsForUI() ([]AccountOption, error) {
 		if a.Disabled || a.Unavailable {
 			continue
 		}
-		// Label preference: full file Name (most informative — includes team ID
-		// and email), then Label, then Email, then AuthIndex as last resort.
-		label := a.Name
+		// Label preference: ID (the credential file name, e.g.
+		// codex-44411af1-email-team.json — most informative), then Name,
+		// then Email, then AuthIndex as last resort.
+		label := a.ID
 		if label == "" {
-			label = a.Label
+			label = a.Name
 		}
 		if label == "" {
 			label = a.Email
@@ -385,13 +386,13 @@ func listCodexAccountsForUI() ([]AccountOption, error) {
 		}
 		opts = append(opts, AccountOption{
 			AuthIndex: a.AuthIndex,
-			Name:      a.Name,
-			Label:     label,
+			ID:        a.ID,
+			Name:      label,
 			Email:     a.Email,
 			Account:   a.Account,
 		})
 	}
-	sort.Slice(opts, func(i, j int) bool { return opts[i].Label < opts[j].Label })
+	sort.Slice(opts, func(i, j int) bool { return opts[i].Name < opts[j].Name })
 	return opts, nil
 }
 

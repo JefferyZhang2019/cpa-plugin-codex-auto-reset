@@ -178,8 +178,8 @@ func TestAccountsRoute_ReturnsListWithEnabledFlag(t *testing.T) {
 	// Inject a fake lister so the test doesn't need the host ABI.
 	srv.h.lister = func() ([]AccountOption, error) {
 		return []AccountOption{
-			{AuthIndex: "idx-a", Label: "alice@example.com", Email: "alice@example.com"},
-			{AuthIndex: "idx-b", Label: "bob@example.com", Email: "bob@example.com"},
+			{AuthIndex: "idx-a", ID: "codex-111-alice@example.com-team.json", Name: "codex-111-alice@example.com-team.json", Email: "alice@example.com"},
+			{AuthIndex: "idx-b", ID: "codex-222-bob@example.com-team.json", Name: "codex-222-bob@example.com-team.json", Email: "bob@example.com"},
 		}, nil
 	}
 	status, body, _ := srv.h.handle(http.MethodGet, "/v0/management/plugins/codex-auto-reset/accounts", nil, nil)

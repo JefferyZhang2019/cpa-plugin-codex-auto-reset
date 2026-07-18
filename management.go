@@ -439,7 +439,7 @@ func renderStatusHTML(state *PluginState) string {
         const state = a.state || 'IDLE';
         const snap = (a.attempt && a.attempt.pre_snapshot) || {};
         const credits = snap.available_count == null ? '-' : snap.available_count;
-        const nextAt = a.next_check_at || '';
+        const nextAt = a.next_wake || '';
         return '<div class="card">' +
           '<div class="card-head"><span class="auth-id">' + escapeHTML(id) + '</span>' +
           '<span class="state-badge ' + escapeHTML(state) + '">' + escapeHTML(state) + '</span></div>' +

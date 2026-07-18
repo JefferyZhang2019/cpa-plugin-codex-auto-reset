@@ -294,6 +294,21 @@ func configurePlugin(raw []byte) error {
 	}
 	enabled := cfg.EnabledAccounts
 	globalWorker = NewWorker(cfg, enabled, hostCredsLoader, time.Now)
+	// Wire StateSync so the management UI sees live FSM state and a restart
+	// resumes mid-cycle. Debounce persistence: only write to disk at most every
+	// stateSyncPersistInterval to avoid hammering the file on tight retry loops.
+	globalWorker.StateSync = func(authID string, fsm *AccountFSM) {
+		pluginStateMu.Lock()
+		globalState.Accounts[authID] = AccountRuntime{
+			AuthID:   authID,
+			State:    fsm.State(),
+			NextWake: fsm.NextWake(),
+		}
+		pluginStateMu.Unlock()
+		// Debounced persist. saveState is cheap (small JSON, atomic rename) but
+		// we still avoid doing it on every single step.
+		debouncedSaveState(statePath)
+	}
 	go globalWorker.Run()
 
 	if globalHandlers == nil {
@@ -431,6 +446,46 @@ func defaultStatePath() string {
 	// CPA plugins persist state next to the host's state directory. We use a
 	// fixed filename so .gitignore matches (codex-auto-reset.state.json).
 	return "codex-auto-reset.state.json"
+}
+
+// stateSyncPersistInterval bounds how often StateSync writes to disk. The
+// worker calls StateSync after every FSM step; without a debounce, a retry
+// storm (5 retries over ~48 min) or a fast IDLE patrol loop could write the
+// state file many times per second. 5s is well below any user-perceptible
+// latency while keeping disk writes bounded.
+const stateSyncPersistInterval = 5 * time.Second
+
+var (
+	lastStatePersistMu sync.Mutex
+	lastStatePersist   time.Time
+)
+
+// debouncedSaveState writes state to disk at most once per
+// stateSyncPersistInterval. Safe to call from the worker goroutine on every
+// FSM step. A final write on shutdown is handled by SaveStateNow.
+func debouncedSaveState(path string) {
+	lastStatePersistMu.Lock()
+	if time.Since(lastStatePersist) < stateSyncPersistInterval {
+		lastStatePersistMu.Unlock()
+		return
+	}
+	lastStatePersist = time.Now()
+	lastStatePersistMu.Unlock()
+	pluginStateMu.Lock()
+	snapshot := globalState
+	pluginStateMu.Unlock()
+	_ = saveState(path, snapshot)
+}
+
+// SaveStateNow forces an immediate persist (used on shutdown / reconfigure).
+func SaveStateNow(path string) error {
+	lastStatePersistMu.Lock()
+	lastStatePersist = time.Now()
+	lastStatePersistMu.Unlock()
+	pluginStateMu.Lock()
+	snapshot := globalState
+	pluginStateMu.Unlock()
+	return saveState(path, snapshot)
 }
 
 var _ = strings.TrimSpace

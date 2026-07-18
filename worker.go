@@ -28,6 +28,12 @@ type Worker struct {
 	loader  CredsLoader
 	nowFn   func() time.Time
 
+	// StateSync, if non-nil, is called after every FSM step so the caller
+	// (main.go's configurePlugin) can mirror FSM state into the persisted
+	// PluginState for the management UI and crash recovery. Called inline
+	// from the worker goroutine.
+	StateSync func(authID string, fsm *AccountFSM)
+
 	mu      sync.Mutex
 	fsms    map[string]*AccountFSM
 	logs    *logRing
@@ -189,6 +195,11 @@ func (w *Worker) Run() {
 			fsm.SetNextWake(w.nowFn().Add(w.cfg.RefreshInterval))
 		} else {
 			fsm.SetNextWake(wake)
+		}
+		// Mirror FSM state into the persisted PluginState so the management UI
+		// shows live state and a restart resumes mid-cycle.
+		if w.StateSync != nil {
+			w.StateSync(nextAcct, fsm)
 		}
 	}
 }

@@ -156,3 +156,56 @@ func TestWorker_TriggerCheckDefersNextAuto(t *testing.T) {
 	w.Stop()
 	<-done
 }
+
+// TestWorker_StateSyncPropagatesFSMState verifies the StateSync callback
+// fires after each step and carries the live FSM state. This is the
+// regression guard for the management UI's per-account state badge —
+// without StateSync, the UI would show IDLE forever.
+func TestWorker_StateSyncPropagatesFSMState(t *testing.T) {
+	defer resetTestClock()
+	E := time.Date(2026, 7, 19, 18, 0, 0, 0, time.UTC)
+	cfg := Config{RefreshInterval: 6 * time.Hour, TriggerLeadTime: 6 * time.Hour}
+	fc := &fakeClient{credits: map[string]*Credit{"a1": {ID: "a1", Status: "available", ExpiresAt: E}}, weeklyPct: 10, consumeResp: ConsumeResponse{Code: ConsumeCodeReset}}
+	loader := func(string) (CodexCredentials, ResetClient, error) {
+		return CodexCredentials{AccessToken: "t"}, fc, nil
+	}
+	w := NewWorker(cfg, []string{"a"}, loader, time.Now)
+	w.testAccelerate = true
+	withTestClock(w, E.Add(-12*time.Hour))
+
+	// Track every (authID, state) snapshot the callback sees.
+	var snapsMu sync.Mutex
+	var seenStates []State
+	w.StateSync = func(authID string, fsm *AccountFSM) {
+		if authID != "a" {
+			return
+		}
+		snapsMu.Lock()
+		seenStates = append(seenStates, fsm.State())
+		snapsMu.Unlock()
+	}
+
+	done := make(chan struct{})
+	go func() { w.Run(); close(done) }()
+	time.Sleep(300 * time.Millisecond)
+	w.Stop()
+	<-done
+
+	snapsMu.Lock()
+	defer snapsMu.Unlock()
+	if len(seenStates) == 0 {
+		t.Fatalf("StateSync was never called; management UI would see no state updates")
+	}
+	// Over a full cycle the FSM must have visited at least CONFIRMING or
+	// RESETTING or VERIFYING (i.e. not stuck at IDLE the whole time).
+	progressed := false
+	for _, s := range seenStates {
+		if s == StateCONFIRMING || s == StateRESETTING || s == StateVERIFYING || s == StateDONE {
+			progressed = true
+			break
+		}
+	}
+	if !progressed {
+		t.Fatalf("FSM never progressed beyond IDLE/ARMED in snapshots: %v", seenStates)
+	}
+}

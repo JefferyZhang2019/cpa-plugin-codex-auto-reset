@@ -1,0 +1,23 @@
+# Build outputs
+build/
+dist/
+.worktrees/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+
+# Test artifacts
+coverage.out
+*.prof
+
+# Local plugin state
+codex-quota-scheduler.state.json
+*.annotations.json
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

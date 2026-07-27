@@ -234,9 +234,16 @@ func (f *AccountFSM) stepCONFIRMING() time.Time {
 	}
 	f.state = StateRESETTING
 	f.log("info",
-		fmt.Sprintf("confirmed target credit %s (weekly was %d%%); sending reset request", shortID(target.ID), snap.WeeklyPct),
+		fmt.Sprintf("confirmed target credit %s (pre: credits=%d, weekly=%d%%); sending reset request",
+			shortID(target.ID), snap.AvailableCount, snap.WeeklyPct),
 		"send reset request", nil,
-		map[string]any{"credit_id": target.ID})
+		map[string]any{
+			"credit_id":           target.ID,
+			"pre_credits":         snap.AvailableCount,
+			"pre_weekly_pct":      snap.WeeklyPct,
+			"target_expires_at":   target.ExpiresAt,
+			"redeem_request_id":   f.attempt.RedeemRequestID,
+		})
 	return f.now()
 }
 
@@ -249,9 +256,15 @@ func (f *AccountFSM) stepRESETTING() time.Time {
 		f.verifyDue = now.Add(postResetVerifyDelay)
 		f.nextWake = f.verifyDue
 		f.log("info",
-			fmt.Sprintf("reset request accepted (code=%s, windows_reset=%d); will verify in %v", resp.Code, resp.WindowsReset, postResetVerifyDelay),
+			fmt.Sprintf("reset request accepted (code=%s, windows_reset=%d); will verify in %v",
+				resp.Code, resp.WindowsReset, postResetVerifyDelay),
 			fmt.Sprintf("verify in %v", postResetVerifyDelay), &f.verifyDue,
-			map[string]any{"redeem_request_id": f.attempt.RedeemRequestID, "credit_id": f.attempt.TargetCreditID})
+			map[string]any{
+				"redeem_request_id": f.attempt.RedeemRequestID,
+				"credit_id":         f.attempt.TargetCreditID,
+				"consume_code":      resp.Code,
+				"windows_reset":     resp.WindowsReset,
+			})
 		return f.verifyDue
 	case decisionStop:
 		f.state = StateDONE
@@ -287,18 +300,22 @@ func (f *AccountFSM) stepVERIFYING() time.Time {
 	credits, err := f.Client.ListCredits(f.Creds)
 	if err != nil {
 		f.state = StateDONE
-		f.log("error", fmt.Sprintf("verification failed: %v", err), "abandon", nil, nil)
+		f.log("error", fmt.Sprintf("verification failed: %v", err), "abandon", nil,
+			map[string]any{"redeem_request_id": f.attempt.RedeemRequestID, "target_credit_id": f.attempt.TargetCreditID})
 		return time.Time{}
 	}
 	usage, err := f.Client.GetUsage(f.Creds)
 	if err != nil {
 		f.state = StateDONE
-		f.log("error", fmt.Sprintf("verification failed: %v", err), "abandon", nil, nil)
+		f.log("error", fmt.Sprintf("verification failed: %v", err), "abandon", nil,
+			map[string]any{"redeem_request_id": f.attempt.RedeemRequestID, "target_credit_id": f.attempt.TargetCreditID})
 		return time.Time{}
 	}
-	// Triple deduction check (spec §4.3 invariant 3). Mirrors sim/engine.go's
-	// stepVERIFYING exactly: target gone, available count dropped by exactly 1,
-	// and weekly quota recovered (>=100 OR strictly greater than pre-snapshot).
+	// Update lastSnapshot with post-reset data so the UI shows the new state.
+	credits.WeeklyPct = usage.WeeklyPct
+	f.lastSnapshot = credits
+
+	// Triple deduction check (spec §4.3 invariant 3).
 	targetGone := true
 	for _, c := range credits.Credits {
 		if c.ID == f.attempt.TargetCreditID && c.Status == "available" {
@@ -310,20 +327,38 @@ func (f *AccountFSM) stepVERIFYING() time.Time {
 	quotaUp := usage.WeeklyPct >= 100 || usage.WeeklyPct > f.attempt.PreSnapshot.WeeklyPct
 
 	f.state = StateDONE
+	// Build detailed details map with full before/after snapshot.
+	details := map[string]any{
+		"credit_id":            f.attempt.TargetCreditID,
+		"redeem_request_id":    f.attempt.RedeemRequestID,
+		"pre_credits":          f.attempt.PreSnapshot.AvailableCount,
+		"post_credits":         credits.AvailableCount,
+		"pre_weekly_pct":       f.attempt.PreSnapshot.WeeklyPct,
+		"post_weekly_pct":      usage.WeeklyPct,
+		"target_gone":          targetGone,
+		"count_down_1":         countDown1,
+		"quota_recovered":      quotaUp,
+	}
+
 	switch {
 	case targetGone && countDown1 && quotaUp:
 		f.log("info",
-			fmt.Sprintf("reset verified: credits %d→%d, weekly %d%%→%d%%", f.attempt.PreSnapshot.AvailableCount, credits.AvailableCount, f.attempt.PreSnapshot.WeeklyPct, usage.WeeklyPct),
-			"cycle complete", nil, map[string]any{"credit_id": f.attempt.TargetCreditID})
+			fmt.Sprintf("reset verified OK: credits %d→%d, weekly %d%%→%d%%, target %s consumed",
+				f.attempt.PreSnapshot.AvailableCount, credits.AvailableCount,
+				f.attempt.PreSnapshot.WeeklyPct, usage.WeeklyPct,
+				shortID(f.attempt.TargetCreditID)),
+			"cycle complete", nil, details)
 	case targetGone && countDown1:
 		f.log("warn",
-			fmt.Sprintf("reset partial: credits ok but weekly %d%%→%d%% (delayed?)", f.attempt.PreSnapshot.WeeklyPct, usage.WeeklyPct),
-			"cycle complete", nil, nil)
+			fmt.Sprintf("reset PARTIAL: credits %d→%d ok but weekly %d%%→%d%% (delayed recovery?)",
+				f.attempt.PreSnapshot.AvailableCount, credits.AvailableCount,
+				f.attempt.PreSnapshot.WeeklyPct, usage.WeeklyPct),
+			"cycle complete", nil, details)
 	default:
 		f.log("error",
-			fmt.Sprintf("verification mismatch: target gone=%v, count-1=%v, quota up=%v — halted", targetGone, countDown1, quotaUp),
-			"abandon", nil,
-			map[string]any{"redeem_request_id": f.attempt.RedeemRequestID, "target_credit_id": f.attempt.TargetCreditID})
+			fmt.Sprintf("reset MISMATCH: target_gone=%v count_down_1=%v quota_recovered=%v — halted, no compensating request",
+				targetGone, countDown1, quotaUp),
+			"abandon", nil, details)
 	}
 	return time.Time{}
 }

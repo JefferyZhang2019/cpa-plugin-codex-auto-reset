@@ -295,6 +295,10 @@ func configurePlugin(raw []byte) error {
 	}
 	enabled := cfg.EnabledAccounts
 	globalWorker = NewWorker(cfg, enabled, hostCredsLoader, time.Now)
+	// Restore persisted logs into the ring so they survive CPA restarts.
+	if len(loaded.Logs) > 0 {
+		globalWorker.Logs().load(loaded.Logs)
+	}
 	// Wire StateSync so the management UI sees live FSM state and a restart
 	// resumes mid-cycle. Debounce persistence: only write to disk at most every
 	// stateSyncPersistInterval to avoid hammering the file on tight retry loops.
@@ -306,9 +310,9 @@ func configurePlugin(raw []byte) error {
 			NextWake:     fsm.NextWake(),
 			LastSnapshot: fsm.LastSnapshot(),
 		}
+		// Also sync logs to the persisted state.
+		globalState.Logs = globalWorker.Logs().all()
 		pluginStateMu.Unlock()
-		// Debounced persist. saveState is cheap (small JSON, atomic rename) but
-		// we still avoid doing it on every single step.
 		debouncedSaveState(statePath)
 	}
 	go globalWorker.Run()
@@ -337,6 +341,12 @@ func restartWorkerFromState() {
 	}
 	cfg := globalState.Config
 	w := NewWorker(cfg, cfg.EnabledAccounts, hostCredsLoader, time.Now)
+	// Carry over existing logs so a settings-change restart doesn't lose them.
+	if globalWorker != nil {
+		w.Logs().load(globalWorker.Logs().all())
+	} else if len(globalState.Logs) > 0 {
+		w.Logs().load(globalState.Logs)
+	}
 	w.StateSync = func(authID string, fsm *AccountFSM) {
 		pluginStateMu.Lock()
 		globalState.Accounts[authID] = AccountRuntime{
@@ -345,6 +355,7 @@ func restartWorkerFromState() {
 			NextWake:     fsm.NextWake(),
 			LastSnapshot: fsm.LastSnapshot(),
 		}
+		globalState.Logs = w.Logs().all()
 		pluginStateMu.Unlock()
 		debouncedSaveState(defaultStatePath())
 	}

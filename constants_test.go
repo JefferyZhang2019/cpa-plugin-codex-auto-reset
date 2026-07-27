@@ -30,10 +30,10 @@ func TestConstants_MatchSpec(t *testing.T) {
 			t.Fatalf("resetRetryDelays[%d] = %v, want %v", i, resetRetryDelays[i], want[i])
 		}
 	}
-	if maxLogEntries != 200 {
+	if maxLogEntries != 1000 {
 		t.Fatalf("maxLogEntries = %d", maxLogEntries)
 	}
-	if logRetention != 24*time.Hour {
+	if logRetention != 7*24*time.Hour {
 		t.Fatalf("logRetention = %v", logRetention)
 	}
 }

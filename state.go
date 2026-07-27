@@ -10,9 +10,12 @@ import (
 // PluginState is the on-disk persistent shape. The plugin writes this to
 // <state-dir>/codex-auto-reset.state.json after every meaningful change so a
 // restart resumes patrols and survives crashes without losing account state.
+// Logs are persisted here too so a CPA restart or worker crash doesn't lose
+// the audit trail.
 type PluginState struct {
 	Config   Config                    `json:"config"`
 	Accounts map[string]AccountRuntime `json:"accounts"`
+	Logs     []LogEntry                `json:"logs,omitempty"`
 }
 
 // AccountRuntime is the persisted per-account FSM snapshot. Only the fields

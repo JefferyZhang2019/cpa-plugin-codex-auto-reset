@@ -20,8 +20,8 @@ const codexUserAgent = "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTermi
 // every other value here is a true const.
 const (
 	postResetVerifyDelay = 1 * time.Minute
-	maxLogEntries        = 200
-	logRetention         = 24 * time.Hour
+	maxLogEntries        = 1000
+	logRetention         = 7 * 24 * time.Hour
 )
 
 var resetRetryDelays = []time.Duration{

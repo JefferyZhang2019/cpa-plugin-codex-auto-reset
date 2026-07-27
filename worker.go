@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -136,7 +137,25 @@ func (w *Worker) ForceConfirm(authID string) {
 // Run blocks until Stop. Initializes FSMs, then loops: pick the soonest
 // nextWake, sleep (or advance the clock if testAccelerate), step that account,
 // refresh its credentials first.
+//
+// CRITICAL: the entire loop body is wrapped in a defer/recover so that a
+// panic in any single account's Step() (nil pointer, bad JSON, network
+// timeout, etc.) does NOT kill the worker goroutine and strand all other
+// accounts forever. The panicking account gets its nextWake pushed forward
+// and the loop continues.
 func (w *Worker) Run() {
+	defer func() {
+		if r := recover(); r != nil {
+			// This should never happen — the inner recover should catch per-account
+			// panics. But if something in the loop infrastructure panics, log it
+			// rather than dying silently.
+			w.logs.append(LogEntry{
+				Timestamp: w.nowFn(), Level: "error", Scope: "system",
+				Message: fmt.Sprintf("worker Run() panic (outer): %v", r),
+			})
+		}
+	}()
+
 	w.mu.Lock()
 	for _, id := range w.enabled {
 		w.ensureFSM(id)
@@ -159,48 +178,74 @@ func (w *Worker) Run() {
 		now := w.nowFn()
 		if nextWake.After(now) {
 			if w.testAccelerate {
-				// Jump the injected clock forward instead of real sleeping.
-				// Only works when nowFn is backed by a mutable clock (tests).
-				// For the default time.Now, testAccelerate is never set.
 				w.advanceClock(nextWake)
 			} else {
 				w.sleepOrStop(nextWake.Sub(now))
 			}
 			continue
 		}
-		// Step the account. Refresh creds first so we use the freshest token.
-		w.mu.Lock()
-		fsm := w.fsms[nextAcct]
-		w.mu.Unlock()
-		if fsm == nil {
-			w.ensureFSM(nextAcct)
-			continue
-		}
-		creds, client, err := w.loader(nextAcct)
-		if err != nil {
+
+		// Step ONE account with full panic recovery.
+		w.stepAccountSafe(nextAcct)
+	}
+}
+
+// stepAccountSafe steps a single account, recovering from any panic so the
+// worker goroutine survives. On panic, the account gets nextWake pushed
+// forward by refresh_interval and an error log is recorded.
+func (w *Worker) stepAccountSafe(authID string) {
+	defer func() {
+		if r := recover(); r != nil {
 			w.logs.append(LogEntry{
-				Timestamp: w.nowFn(), Level: "error", Scope: nextAcct,
-				State: fsm.State(), Message: "credential load failed: " + err.Error(),
+				Timestamp: w.nowFn(), Level: "error", Scope: authID,
+				Message: fmt.Sprintf("worker panic recovered: %v", r),
 			})
-			fsm.SetNextWake(w.nowFn().Add(w.cfg.RefreshInterval))
-			continue
+			// Push the account's next wake forward so it retries later.
+			w.mu.Lock()
+			if fsm, ok := w.fsms[authID]; ok {
+				fsm.SetNextWake(w.nowFn().Add(w.cfg.RefreshInterval))
+			}
+			w.mu.Unlock()
 		}
-		fsm.Creds = creds
-		fsm.Client = client
-		wake := fsm.Step()
-		if wake.IsZero() && fsm.State() == StateDONE {
-			// Cycle complete. Deferral rule (spec §6.3): next auto-check is
-			// completion_time + refresh_interval, not the original schedule.
-			fsm.Reset()
-			fsm.SetNextWake(w.nowFn().Add(w.cfg.RefreshInterval))
-		} else {
-			fsm.SetNextWake(wake)
-		}
-		// Mirror FSM state into the persisted PluginState so the management UI
-		// shows live state and a restart resumes mid-cycle.
-		if w.StateSync != nil {
-			w.StateSync(nextAcct, fsm)
-		}
+	}()
+
+	w.mu.Lock()
+	fsm := w.fsms[authID]
+	w.mu.Unlock()
+	if fsm == nil {
+		w.ensureFSM(authID)
+		return
+	}
+
+	// Refresh credentials before stepping.
+	creds, client, err := w.loader(authID)
+	if err != nil {
+		w.logs.append(LogEntry{
+			Timestamp: w.nowFn(), Level: "error", Scope: authID,
+			State: fsm.State(), Message: "credential load failed: " + err.Error(),
+		})
+		fsm.SetNextWake(w.nowFn().Add(w.cfg.RefreshInterval))
+		return
+	}
+
+	// Set credentials and client under the FSM mutex to avoid data races
+	// with concurrent State()/NextWake() readers.
+	fsm.mu.Lock()
+	fsm.Creds = creds
+	fsm.Client = client
+	fsm.mu.Unlock()
+
+	wake := fsm.Step()
+	if wake.IsZero() && fsm.State() == StateDONE {
+		fsm.Reset()
+		fsm.SetNextWake(w.nowFn().Add(w.cfg.RefreshInterval))
+	} else {
+		fsm.SetNextWake(wake)
+	}
+
+	// Mirror FSM state into the persisted PluginState.
+	if w.StateSync != nil {
+		w.StateSync(authID, fsm)
 	}
 }
 

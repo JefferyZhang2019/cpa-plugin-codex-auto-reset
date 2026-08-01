@@ -299,6 +299,10 @@ func configurePlugin(raw []byte) error {
 	if len(loaded.Logs) > 0 {
 		globalWorker.Logs().load(loaded.Logs)
 	}
+	// Backfill reset history from logs if not already in ResetHistory.
+	// This ensures past resets (from before the history feature existed)
+	// are counted in the statistics panel.
+	backfillResetHistoryFromLogs(loaded)
 	// Wire StateSync so the management UI sees live FSM state and a restart
 	// resumes mid-cycle. Debounce persistence: only write to disk at most every
 	// stateSyncPersistInterval to avoid hammering the file on tight retry loops.
@@ -309,6 +313,15 @@ func configurePlugin(raw []byte) error {
 			State:        fsm.State(),
 			NextWake:     fsm.NextWake(),
 			LastSnapshot: fsm.LastSnapshot(),
+		}
+		// Collect pending reset history from the FSM (set in stepVERIFYING,
+		// not cleared by Reset).
+		if rec := fsm.TakePendingHistory(); rec != nil {
+			globalState.ResetHistory = append(globalState.ResetHistory, *rec)
+			// Cap at 500 entries (FIFO).
+			if len(globalState.ResetHistory) > 500 {
+				globalState.ResetHistory = globalState.ResetHistory[len(globalState.ResetHistory)-500:]
+			}
 		}
 		// Also sync logs to the persisted state.
 		globalState.Logs = globalWorker.Logs().all()
@@ -354,6 +367,12 @@ func restartWorkerFromState() {
 			State:        fsm.State(),
 			NextWake:     fsm.NextWake(),
 			LastSnapshot: fsm.LastSnapshot(),
+		}
+		if rec := fsm.TakePendingHistory(); rec != nil {
+			globalState.ResetHistory = append(globalState.ResetHistory, *rec)
+			if len(globalState.ResetHistory) > 500 {
+				globalState.ResetHistory = globalState.ResetHistory[len(globalState.ResetHistory)-500:]
+			}
 		}
 		globalState.Logs = w.Logs().all()
 		pluginStateMu.Unlock()
@@ -529,6 +548,67 @@ func defaultStatePath() string {
 	// CPA plugins persist state next to the host's state directory. We use a
 	// fixed filename so .gitignore matches (codex-auto-reset.state.json).
 	return "codex-auto-reset.state.json"
+}
+
+// backfillResetHistoryFromLogs scans persisted logs for "reset verified OK" /
+// "PARTIAL" / "MISMATCH" entries and creates ResetRecords for any that aren't
+// already in ResetHistory. This ensures past resets (from before the history
+// feature was added) are counted in statistics. Deduplicates by timestamp+authID.
+func backfillResetHistoryFromLogs(state *PluginState) {
+	if len(state.Logs) == 0 {
+		return
+	}
+	// Build a set of existing (timestamp, authID) pairs for dedup.
+	existing := make(map[string]bool, len(state.ResetHistory))
+	for _, r := range state.ResetHistory {
+		key := r.AuthID + "|" + r.Timestamp.Format(time.RFC3339Nano)
+		existing[key] = true
+	}
+
+	for _, e := range state.Logs {
+		// Only process DONE-state entries that mention "reset".
+		if e.State != StateDONE {
+			continue
+		}
+		details := e.Details
+		if details == nil {
+			continue
+		}
+		// Check if this log has reset verification data.
+		preCredits, _ := details["pre_credits"].(float64)
+		postCredits, _ := details["post_credits"].(float64)
+		preWeekly, _ := details["pre_weekly_pct"].(float64)
+		postWeekly, _ := details["post_weekly_pct"].(float64)
+		creditID, _ := details["credit_id"].(string)
+
+		// Skip if no meaningful data.
+		if preCredits == 0 && postCredits == 0 && creditID == "" {
+			continue
+		}
+
+		key := e.Scope + "|" + e.Timestamp.Format(time.RFC3339Nano)
+		if existing[key] {
+			continue
+		}
+
+		// Determine success from the log message.
+		success := false
+		if strings.Contains(e.Message, "verified OK") {
+			success = true
+		}
+
+		state.ResetHistory = append(state.ResetHistory, ResetRecord{
+			Timestamp:     e.Timestamp,
+			AuthID:        e.Scope,
+			CreditID:      creditID,
+			Success:       success,
+			PreWeeklyPct:  int(preWeekly),
+			PostWeeklyPct: int(postWeekly),
+			PreCredits:    int(preCredits),
+			PostCredits:   int(postCredits),
+		})
+		existing[key] = true
+	}
 }
 
 // stateSyncPersistInterval bounds how often StateSync writes to disk. The

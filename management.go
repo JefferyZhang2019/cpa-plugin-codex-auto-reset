@@ -134,10 +134,14 @@ func (h *managementHandlers) statusJSON() (int, []byte) {
 	for k, v := range h.state.Accounts {
 		accts[k] = v
 	}
+	// Deep-copy reset history.
+	history := make([]ResetRecord, len(h.state.ResetHistory))
+	copy(history, h.state.ResetHistory)
 	out := map[string]any{
-		"plugin":   pluginID,
-		"config":   h.state.Config,
-		"accounts": accts,
+		"plugin":        pluginID,
+		"config":        h.state.Config,
+		"accounts":      accts,
+		"reset_history": history,
 	}
 	return jsonOK(out)
 }
@@ -447,6 +451,10 @@ func renderStatusHTML(state *PluginState) string {
         </div>
       </section>
       <section>
+        <div id="statsPanel" class="panel" style="margin-bottom:16px; display:none;">
+          <h2 data-i18n="resetStats">Reset Statistics</h2>
+          <div id="statsContent"></div>
+        </div>
         <div id="accounts"><p class="muted" data-i18n="loadPrompt">Enter the CPA management key and click Load status.</p></div>
         <div class="panel" style="margin-top:16px;">
           <h2 data-i18n="logs">Logs</h2>
@@ -482,6 +490,7 @@ func renderStatusHTML(state *PluginState) string {
         noAccounts: "No accounts enabled.",
         neverExpires: "never expires",
         expired: "expired",
+        resetStats: "Reset Statistics",
         settingsSaved: "Settings saved.",
         confirmReset: "Force a reset cycle for this account now?",
         keyRequired: "Management key is required."
@@ -511,6 +520,7 @@ func renderStatusHTML(state *PluginState) string {
         noAccounts: "\u672a\u542f\u7528\u4efb\u4f55\u8d26\u53f7\u3002",
         neverExpires: "\u6c38\u4e0d\u8fc7\u671f",
         expired: "\u5df2\u8fc7\u671f",
+        resetStats: "\u91cd\u7f6e\u7edf\u8ba1",
         settingsSaved: "\u8bbe\u7f6e\u5df2\u4fdd\u5b58\u3002",
         confirmReset: "\u7acb\u5373\u5bf9\u8be5\u8d26\u53f7\u89e6\u53d1\u4e00\u6b21\u91cd\u7f6e\u6d41\u7a0b\uff1f",
         keyRequired: "\u9700\u8981\u7ba1\u7406\u5bc6\u94a5\u3002"
@@ -567,6 +577,60 @@ func renderStatusHTML(state *PluginState) string {
         .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
     // describeNextAction renders the "next" line based on FSM state.
+    // renderCardHistory renders the recent reset records for one account card.
+    function renderCardHistory(records) {
+      if (!records || records.length === 0) return '';
+      var zh = document.getElementById('locale').value === 'zh';
+      var lines = records.map(function (r) {
+        var icon = r.success ? '✅' : '❌';
+        var time = fmtTime(r.timestamp);
+        var quota = (r.pre_weekly_pct != null && r.post_weekly_pct != null)
+          ? r.pre_weekly_pct + '%→' + r.post_weekly_pct + '%'
+          : '—';
+        var label = zh ? '重置' : 'reset';
+        return '<div style="font-size:11px; padding-left:12px;">' + icon + ' ' + time + ' ' + label + ': ' + escapeHTML(quota) + '</div>';
+      }).join('');
+      return '<div style="margin-top:6px; padding-top:6px; border-top:1px solid color-mix(in srgb,CanvasText 8%,Canvas 92%);">' +
+        '<span class="k" style="font-size:11px;">' + escapeHTML(zh ? '重置历史' : 'Reset history') + '</span>' +
+        lines + '</div>';
+    }
+
+    // renderStats renders the top statistics panel from reset_history.
+    function renderStats(history) {
+      var panel = document.getElementById('statsPanel');
+      var content = document.getElementById('statsContent');
+      if (!history || history.length === 0) {
+        panel.style.display = 'none';
+        return;
+      }
+      panel.style.display = 'block';
+
+      var totalSuccess = 0, totalFail = 0, totalRecovered = 0;
+      var now = new Date();
+      var weekAgo = now.getTime() - 7 * 86400000;
+      var weekSuccess = 0;
+
+      history.forEach(function (r) {
+        if (r.success) {
+          totalSuccess++;
+          var recovered = r.post_weekly_pct - r.pre_weekly_pct;
+          if (recovered > 0) totalRecovered += recovered;
+          if (new Date(r.timestamp).getTime() >= weekAgo) weekSuccess++;
+        } else {
+          totalFail++;
+        }
+      });
+
+      var zh = document.getElementById('locale').value === 'zh';
+      var html = '<div class="kv">' +
+        '<span class="k">' + (zh ? '累计成功' : 'Total success') + '</span><span style="font-weight:700; color:#15803d;">' + totalSuccess + (zh ? ' 次' : '') + '</span>' +
+        '<span class="k">' + (zh ? '累计失败' : 'Total fail') + '</span><span style="font-weight:700; ' + (totalFail > 0 ? 'color:#dc2626;' : '') + '">' + totalFail + (zh ? ' 次' : '') + '</span>' +
+        '<span class="k">' + (zh ? '恢复额度' : 'Recovered') + '</span><span style="font-weight:700;">+' + totalRecovered + '%</span>' +
+        '<span class="k">' + (zh ? '本周成功' : 'This week') + '</span><span>' + weekSuccess + (zh ? ' 次' : '') + '</span>' +
+        '</div>';
+      content.innerHTML = html;
+    }
+
     function describeNextAction(state, nextAt) {
       const zh = document.getElementById('locale').value === 'zh';
       const time = nextAt && !nextAt.startsWith('0001-') ? fmtTime(nextAt) : '';
@@ -593,7 +657,21 @@ func renderStatusHTML(state *PluginState) string {
       }
     }
 
-    function renderAccounts(status, logEntries) {
+    function renderAccounts(status, logEntries, resetHistory) {
+      // Build per-account reset history lookup (most recent 3 per account).
+      var historyByAcct = {};
+      (resetHistory || []).forEach(function (r) {
+        if (!r.auth_id) return;
+        if (!historyByAcct[r.auth_id]) historyByAcct[r.auth_id] = [];
+        historyByAcct[r.auth_id].push(r);
+      });
+      // Sort each account's history descending by time, keep top 3.
+      Object.keys(historyByAcct).forEach(function (k) {
+        historyByAcct[k].sort(function (a, b) {
+          return new Date(b.timestamp) - new Date(a.timestamp);
+        });
+        historyByAcct[k] = historyByAcct[k].slice(0, 3);
+      });
       const box = document.getElementById('accounts');
       const accts = (status && status.accounts) || {};
       const ids = Object.keys(accts);
@@ -656,6 +734,7 @@ func renderStatusHTML(state *PluginState) string {
           '</div>' +
           creditListHtml +
           statusPanel +
+          renderCardHistory(historyByAcct[id]) +
           '<div class="actions" style="margin-top:8px;">' +
           '<button class="check-btn" data-auth="' + escapeHTML(id) + '">' + escapeHTML(t('check')) + '</button>' +
           '<button class="secondary reset-btn" data-auth="' + escapeHTML(id) + '">' + escapeHTML(t('reset')) + '</button>' +
@@ -803,7 +882,8 @@ func renderStatusHTML(state *PluginState) string {
         (acctsResp.accounts || []).forEach(function (a) {
           accountNameMap[a.auth_index] = a.name || a.email || a.auth_index;
         });
-        renderAccounts(status, logsResp.entries || []);
+        renderAccounts(status, logsResp.entries || [], status.reset_history || []);
+        renderStats(status.reset_history || []);
         renderLogs(logsResp.entries || []);
         const c = status.config || {};
         document.getElementById('refreshInterval').value = (c.refresh_interval || '').toString();

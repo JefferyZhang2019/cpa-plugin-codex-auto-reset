@@ -13,9 +13,10 @@ import (
 // Logs are persisted here too so a CPA restart or worker crash doesn't lose
 // the audit trail.
 type PluginState struct {
-	Config   Config                    `json:"config"`
-	Accounts map[string]AccountRuntime `json:"accounts"`
-	Logs     []LogEntry                `json:"logs,omitempty"`
+	Config       Config                    `json:"config"`
+	Accounts     map[string]AccountRuntime `json:"accounts"`
+	Logs         []LogEntry                `json:"logs,omitempty"`
+	ResetHistory []ResetRecord             `json:"reset_history,omitempty"`
 }
 
 // AccountRuntime is the persisted per-account FSM snapshot. Only the fields

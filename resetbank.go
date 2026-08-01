@@ -40,6 +40,10 @@ type AccountFSM struct {
 	attempt   ResetAttempt
 	nextWake  time.Time
 	verifyDue time.Time
+	// pendingHistory is set in stepVERIFYING with the reset result. NOT cleared
+	// by Reset() so the worker can collect it after the cycle ends. The worker
+	// sets it back to nil after collecting.
+	pendingHistory *ResetRecord
 	// lastSnapshot is the most recent Snapshot observed by any state step
 	// (IDLE patrol, CONFIRMING pre-reset, VERIFYING post-reset). The worker
 	// mirrors it into AccountRuntime so the management UI can show live
@@ -340,8 +344,10 @@ func (f *AccountFSM) stepVERIFYING() time.Time {
 		"quota_recovered":      quotaUp,
 	}
 
+	success := targetGone && countDown1 && quotaUp
+
 	switch {
-	case targetGone && countDown1 && quotaUp:
+	case success:
 		f.log("info",
 			fmt.Sprintf("reset verified OK: credits %d→%d, weekly %d%%→%d%%, target %s consumed",
 				f.attempt.PreSnapshot.AvailableCount, credits.AvailableCount,
@@ -360,11 +366,25 @@ func (f *AccountFSM) stepVERIFYING() time.Time {
 				targetGone, countDown1, quotaUp),
 			"abandon", nil, details)
 	}
+
+	// Capture the reset result for history. NOT cleared by Reset().
+	f.pendingHistory = &ResetRecord{
+		Timestamp:     f.now(),
+		AuthID:        f.AuthID,
+		CreditID:      f.attempt.TargetCreditID,
+		Success:       success,
+		PreWeeklyPct:  f.attempt.PreSnapshot.WeeklyPct,
+		PostWeeklyPct: usage.WeeklyPct,
+		PreCredits:    f.attempt.PreSnapshot.AvailableCount,
+		PostCredits:   credits.AvailableCount,
+	}
+
 	return time.Time{}
 }
 
 // Reset returns a DONE FSM to IDLE for the next patrol cycle. Called by the
-// worker after a cycle completes. Thread-safe.
+// worker after a cycle completes. Thread-safe. Does NOT clear pendingHistory
+// — the worker collects it separately via TakePendingHistory().
 func (f *AccountFSM) Reset() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -372,6 +392,16 @@ func (f *AccountFSM) Reset() {
 	f.attempt = ResetAttempt{}
 	f.verifyDue = time.Time{}
 	f.nextWake = time.Time{}
+}
+
+// TakePendingHistory returns the reset result captured in stepVERIFYING and
+// clears it. Returns nil if no pending history. Thread-safe.
+func (f *AccountFSM) TakePendingHistory() *ResetRecord {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	rec := f.pendingHistory
+	f.pendingHistory = nil
+	return rec
 }
 
 // shortID truncates a long credit/redeem ID for readable log messages.

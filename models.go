@@ -60,6 +60,20 @@ type LogEntry struct {
 	Details    map[string]any `json:"details,omitempty"`
 }
 
+// ResetRecord captures the result of one completed reset cycle. Persisted in
+// PluginState.ResetHistory so the UI can show per-account history and a
+// global statistics panel. Survives CPA restarts.
+type ResetRecord struct {
+	Timestamp     time.Time `json:"timestamp"`
+	AuthID        string    `json:"auth_id"`
+	CreditID      string    `json:"credit_id,omitempty"`
+	Success       bool      `json:"success"`
+	PreWeeklyPct  int       `json:"pre_weekly_pct"`
+	PostWeeklyPct int       `json:"post_weekly_pct"`
+	PreCredits    int       `json:"pre_credits"`
+	PostCredits   int       `json:"post_credits"`
+}
+
 // availableCreditsSorted implements spec §2.3: filter to status=="available"
 // AND expires_at > now (local defensive filter against server-side cleanup
 // lag), then sort ascending by ExpiresAt with zero-expiry ("never") entries

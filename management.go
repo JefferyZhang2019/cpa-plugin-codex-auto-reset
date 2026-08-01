@@ -351,123 +351,347 @@ func renderStatusHTML(state *PluginState) string {
   <title>Codex Auto Reset</title>
   <style>
     :root {
-      color-scheme: light dark;
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-      background: Canvas;
-      color: CanvasText;
+      --bg: #f6f8fa;
+      --surface: #ffffff;
+      --surface-2: #f6f8fa;
+      --border: #e1e4e8;
+      --border-strong: #d0d7de;
+      --text: #24292e;
+      --text-muted: #6a737d;
+      --primary: #0969da;
+      --primary-soft: rgba(9, 105, 218, 0.10);
+      --primary-text: #ffffff;
+      --success: #1a7f37;
+      --success-soft: rgba(26, 127, 55, 0.12);
+      --warning: #9a6700;
+      --warning-soft: rgba(154, 103, 0, 0.14);
+      --danger: #cf222e;
+      --danger-soft: rgba(207, 34, 46, 0.10);
+      --radius: 8px;
+      --radius-sm: 6px;
+      --radius-lg: 12px;
+      --shadow: 0 1px 3px rgba(0,0,0,0.08);
+      --shadow-md: 0 3px 8px rgba(0,0,0,0.08);
+      --sidebar-width: 300px;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0d1117;
+        --surface: #161b22;
+        --surface-2: #21262d;
+        --border: #30363d;
+        --border-strong: #444c56;
+        --text: #e6edf3;
+        --text-muted: #8b949e;
+        --primary: #58a6ff;
+        --primary-soft: rgba(88, 166, 255, 0.14);
+        --primary-text: #0d1117;
+        --success: #3fb950;
+        --success-soft: rgba(63, 185, 80, 0.16);
+        --warning: #d29922;
+        --warning-soft: rgba(210, 153, 34, 0.16);
+        --danger: #f85149;
+        --danger-soft: rgba(248, 81, 73, 0.16);
+        --shadow: 0 1px 3px rgba(0,0,0,0.3);
+        --shadow-md: 0 3px 8px rgba(0,0,0,0.4);
+      }
     }
     * { box-sizing: border-box; }
-    body { margin: 0; }
-    main { max-width: 1100px; margin: 0 auto; padding: 24px; }
-    header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; flex-wrap: wrap; }
-    h1 { margin: 0; font-size: 22px; font-weight: 700; }
-    h2 { margin: 0 0 12px; font-size: 15px; font-weight: 700; }
-    label { display: grid; gap: 6px; font-size: 13px; font-weight: 600; }
-    input, select, button, textarea { font: inherit; }
-    input, select, textarea {
-      width: 100%; border: 1px solid color-mix(in srgb, CanvasText 18%, Canvas 82%);
-      border-radius: 6px; padding: 8px 10px; background: Canvas; color: CanvasText;
+    html, body { margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
     }
-    button {
-      border: 0; border-radius: 6px; padding: 8px 12px;
-      background: #0f766e; color: #fff; font-weight: 700; cursor: pointer;
+    .app { display: flex; min-height: 100vh; flex-direction: column; }
+    .topbar {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 16px; padding: 14px 24px;
+      background: var(--surface); border-bottom: 1px solid var(--border);
+      position: sticky; top: 0; z-index: 10;
     }
-    button.secondary { background: color-mix(in srgb, CanvasText 10%, Canvas 90%); color: CanvasText; }
-    button:disabled { opacity: .5; cursor: not-allowed; }
-    .layout { display: grid; grid-template-columns: 320px minmax(0,1fr); gap: 16px; align-items: start; }
+    .brand { display: flex; align-items: center; gap: 10px; }
+    .brand .logo {
+      width: 28px; height: 28px; border-radius: 6px;
+      background: linear-gradient(135deg, var(--primary), #6cb6ff);
+      color: #fff; font-weight: 800; display: grid; place-items: center;
+      font-size: 14px;
+    }
+    h1 { margin: 0; font-size: 17px; font-weight: 700; }
+    .topbar-actions { display: flex; align-items: center; gap: 8px; }
+    .locale-switch {
+      display: inline-flex; background: var(--surface-2);
+      border: 1px solid var(--border); border-radius: var(--radius-sm);
+      overflow: hidden;
+    }
+    .locale-switch button {
+      border: 0; background: transparent; color: var(--text-muted);
+      padding: 6px 12px; cursor: pointer; font-weight: 600; font-size: 12px;
+      border-radius: 0;
+    }
+    .locale-switch button.active {
+      background: var(--primary); color: var(--primary-text);
+    }
+
+    .layout {
+      display: grid; grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+      gap: 20px; padding: 20px 24px; max-width: 1400px; width: 100%;
+      margin: 0 auto; flex: 1; align-items: start;
+    }
+
+    .sidebar { position: sticky; top: 72px; display: grid; gap: 16px; }
+
+    .main { display: grid; gap: 16px; min-width: 0; }
+
+    .card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius-lg); box-shadow: var(--shadow);
+      padding: 16px; margin-bottom: 0;
+    }
     .panel {
-      border: 1px solid color-mix(in srgb, CanvasText 14%, Canvas 86%);
-      border-radius: 8px; padding: 16px;
-      background: color-mix(in srgb, Canvas 96%, CanvasText 4%);
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius-lg); box-shadow: var(--shadow);
+      padding: 16px;
     }
-    .fields { display: grid; gap: 12px; }
+    h2 { margin: 0 0 12px; font-size: 13px; font-weight: 700;
+      color: var(--text); text-transform: uppercase; letter-spacing: 0.04em;
+      display: flex; align-items: center; gap: 6px;
+    }
+    h2 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--primary); }
+
+    label.field { display: grid; gap: 5px; font-size: 12px; font-weight: 600; color: var(--text); }
+    input, select, textarea {
+      width: 100%; border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+      padding: 8px 10px; background: var(--surface); color: var(--text);
+      font: inherit; transition: border-color 0.12s, box-shadow 0.12s;
+    }
+    input:focus, select:focus, textarea:focus {
+      outline: none; border-color: var(--primary);
+      box-shadow: 0 0 0 3px var(--primary-soft);
+    }
+    input[type="checkbox"] { width: auto; }
+    button {
+      font: inherit; font-weight: 600; border: 1px solid transparent;
+      border-radius: var(--radius-sm); padding: 8px 14px; cursor: pointer;
+      transition: background 0.12s, border-color 0.12s, opacity 0.12s;
+    }
+    button.primary { background: var(--primary); color: var(--primary-text); }
+    button.primary:hover { filter: brightness(0.95); }
+    button.secondary {
+      background: var(--surface); border-color: var(--border-strong); color: var(--text);
+    }
+    button.secondary:hover { background: var(--surface-2); }
+    button.danger { background: var(--danger); color: #fff; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
     .actions { display: flex; gap: 8px; flex-wrap: wrap; }
     .actions button { width: auto; }
-    .card {
-      border: 1px solid color-mix(in srgb, CanvasText 14%, Canvas 86%);
-      border-radius: 8px; padding: 14px; margin-bottom: 12px;
-      background: color-mix(in srgb, Canvas 96%, CanvasText 4%);
+    .field-stack { display: grid; gap: 12px; }
+
+    /* Account checkboxes */
+    .acct-list { display: grid; gap: 4px; max-height: 220px; overflow-y: auto;
+      padding-right: 4px; margin: 0 -4px 0 0; }
+    .acct-list::-webkit-scrollbar { width: 6px; }
+    .acct-list::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
+    .acct-item { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 500;
+      padding: 5px 8px; border-radius: var(--radius-sm); cursor: pointer; word-break: break-all; }
+    .acct-item:hover { background: var(--surface-2); }
+    .acct-item input { margin: 0; }
+
+    /* Stats panel */
+    .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+    .stat { background: var(--surface-2); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 12px 14px; }
+    .stat .stat-label { font-size: 11px; font-weight: 600; color: var(--text-muted);
+      text-transform: uppercase; letter-spacing: 0.04em; }
+    .stat .stat-value { font-size: 22px; font-weight: 700; margin-top: 4px; line-height: 1.1; }
+    .stat.success .stat-value { color: var(--success); }
+    .stat.danger .stat-value { color: var(--danger); }
+    .stat.primary .stat-value { color: var(--primary); }
+    .stat .stat-sub { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+
+    /* Account cards */
+    .acct-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius-lg); box-shadow: var(--shadow);
+      padding: 16px; margin-bottom: 12px;
+      transition: box-shadow 0.15s, border-color 0.15s;
     }
-    .card-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
-    .auth-id { font-weight: 700; font-size: 14px; }
+    .acct-card:hover { box-shadow: var(--shadow-md); border-color: var(--border-strong); }
+    .card-head { display: flex; justify-content: space-between; align-items: center; gap: 10px;
+      margin-bottom: 12px; flex-wrap: wrap; }
+    .auth-id { font-weight: 700; font-size: 14px; word-break: break-all; }
     .state-badge {
-      font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 4px;
-      background: color-mix(in srgb, #2563eb 18%, Canvas 82%); color: color-mix(in srgb, #2563eb 80%, CanvasText 20%);
+      font-size: 10px; font-weight: 800; letter-spacing: 0.05em;
+      padding: 3px 10px; border-radius: 999px; text-transform: uppercase;
+      background: var(--primary-soft); color: var(--primary); white-space: nowrap;
+      border: 1px solid transparent;
     }
     .state-badge.ARMED, .state-badge.CONFIRMING, .state-badge.RESETTING, .state-badge.VERIFYING {
-      background: color-mix(in srgb, #b45309 18%, Canvas 82%); color: color-mix(in srgb, #b45309 80%, CanvasText 20%);
+      background: var(--warning-soft); color: var(--warning);
     }
-    .state-badge.DONE { background: color-mix(in srgb, #15803d 18%, Canvas 82%); color: color-mix(in srgb, #15803d 80%, CanvasText 20%); }
+    .state-badge.DONE { background: var(--success-soft); color: var(--success); }
+
+    /* Progress bar */
+    .progress { margin: 12px 0; }
+    .progress-head { display: flex; justify-content: space-between; align-items: baseline;
+      font-size: 12px; margin-bottom: 5px; }
+    .progress-head .k { color: var(--text-muted); font-weight: 600; }
+    .progress-head .v { font-weight: 700; }
+    .progress-track {
+      height: 8px; background: var(--surface-2); border-radius: 999px;
+      overflow: hidden; border: 1px solid var(--border);
+    }
+    .progress-fill {
+      height: 100%; border-radius: 999px;
+      background: linear-gradient(90deg, var(--success), #46c75a);
+      transition: width 0.4s ease;
+    }
+    .progress-fill.warn { background: linear-gradient(90deg, var(--warning), #e8b339); }
+    .progress-fill.danger { background: linear-gradient(90deg, var(--danger), #ff6b6b); }
+    .progress-fill.unknown { background: var(--border-strong); }
+
+    .card-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px;
+      margin-top: 12px; }
+    .mini-stat { background: var(--surface-2); border: 1px solid var(--border);
+      border-radius: var(--radius-sm); padding: 8px 10px; }
+    .mini-stat .k { font-size: 10px; font-weight: 600; color: var(--text-muted);
+      text-transform: uppercase; letter-spacing: 0.04em; }
+    .mini-stat .v { font-size: 15px; font-weight: 700; margin-top: 2px; }
+
     .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 12px; }
-    .kv .k { color: color-mix(in srgb, CanvasText 60%, Canvas 40%); }
-    .muted { color: color-mix(in srgb, CanvasText 60%, Canvas 40%); font-size: 12px; }
-    .next { margin-top: 8px; font-size: 12px; padding: 8px; border-radius: 6px; background: color-mix(in srgb, #2563eb 8%, Canvas 92%); }
-    .countdown { color: color-mix(in srgb, CanvasText 60%, Canvas 40%); font-weight: 600; }
-    .log { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 11px; line-height: 1.5; max-height: 320px; overflow-y: auto; padding: 8px; border-radius: 6px; background: color-mix(in srgb, CanvasText 4%, Canvas 96%); }
-    .log .line { white-space: pre-wrap; word-break: break-word; }
-    .log .ts { color: color-mix(in srgb, CanvasText 55%, Canvas 45%); }
-    .log .lvl-warn { color: #b45309; }
-    .log .lvl-error { color: #dc2626; }
-    @media (max-width: 820px) { .layout { grid-template-columns: 1fr; } }
+    .kv .k { color: var(--text-muted); font-weight: 500; }
+    .muted { color: var(--text-muted); font-size: 12px; }
+
+    .credit-list { margin-top: 8px; display: grid; gap: 3px; }
+    .credit-line { font-size: 12px; padding-left: 4px; word-break: break-all; }
+    .credit-line .cid { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-weight: 600; }
+
+    .history { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+    .history .k { font-size: 11px; font-weight: 600; color: var(--text-muted);
+      text-transform: uppercase; letter-spacing: 0.04em; }
+    .history-line { font-size: 11px; padding-left: 4px; margin-top: 3px; }
+
+    .next {
+      margin-top: 10px; font-size: 12px; padding: 10px 12px; border-radius: var(--radius);
+      background: var(--primary-soft); border: 1px solid transparent;
+    }
+    .next .row { display: flex; gap: 6px; align-items: baseline; }
+    .next .row + .row { margin-top: 4px; }
+    .next .k { color: var(--text-muted); font-weight: 600; }
+    .countdown { color: var(--text-muted); font-weight: 600; }
+
+    .card-actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+    .card-actions button { width: auto; padding: 6px 14px; font-size: 13px; }
+
+    /* Logs */
+    .log {
+      font-family: ui-monospace, "SFMono-Regular", "Cascadia Code", Consolas, monospace;
+      font-size: 11.5px; line-height: 1.55; max-height: 340px; overflow-y: auto;
+      padding: 12px; border-radius: var(--radius); background: var(--surface-2);
+      border: 1px solid var(--border);
+    }
+    .log::-webkit-scrollbar { width: 8px; }
+    .log::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
+    .log .line { white-space: pre-wrap; word-break: break-word; padding: 1px 0; }
+    .log .ts { color: var(--text-muted); }
+    .log .lvl-warn { color: var(--warning); font-weight: 700; }
+    .log .lvl-error { color: var(--danger); font-weight: 700; }
+    .log .lvl-info { color: var(--primary); font-weight: 700; }
+
+    .empty {
+      text-align: center; padding: 32px 16px; color: var(--text-muted);
+      font-size: 13px;
+    }
+
+    /* Mobile responsive */
+    @media (max-width: 860px) {
+      .layout { grid-template-columns: 1fr; padding: 16px; }
+      .sidebar { position: static; }
+      .stats-grid { grid-template-columns: repeat(2, 1fr); }
+      .topbar { padding: 12px 16px; }
+    }
+    @media (max-width: 480px) {
+      .stats-grid { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
-  <main>
-    <header>
-      <h1 data-i18n="title">Codex Auto Reset</h1>
-      <div style="display:flex; gap:10px; align-items:center;">
-        <select id="locale" autocomplete="off">
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo">CR</div>
+        <h1 data-i18n="title">Codex Auto Reset</h1>
+      </div>
+      <div class="topbar-actions">
+        <div class="locale-switch" id="localeSwitch">
+          <button type="button" data-locale="en">EN</button>
+          <button type="button" data-locale="zh">ZH</button>
+        </div>
+        <select id="locale" autocomplete="off" style="display:none;">
           <option value="en">EN</option>
           <option value="zh">ZH</option>
         </select>
-        <button id="refresh" type="button" data-i18n="refresh">Refresh</button>
+        <button id="refresh" type="button" class="secondary" data-i18n="refresh">Refresh</button>
       </div>
     </header>
     <div class="layout">
-      <section class="panel">
-        <h2 data-i18n="connection">Connection</h2>
-        <div class="fields">
-          <label><span data-i18n="managementKey">CPA management key</span>
-            <input id="managementKey" type="password" autocomplete="off" spellcheck="false">
-          </label>
-          <div class="actions">
-            <button id="load" type="button" data-i18n="load">Load status</button>
-          </div>
-          <label><span data-i18n="refreshInterval">Refresh interval</span>
-            <input id="refreshInterval" placeholder="12h" spellcheck="false">
-          </label>
-          <label><span data-i18n="triggerLeadTime">Trigger lead time</span>
-            <input id="triggerLeadTime" placeholder="6h" spellcheck="false">
-          </label>
-          <fieldset style="border:1px solid color-mix(in srgb, CanvasText 18%, Canvas 82%); border-radius:6px; padding:10px;">
-            <legend style="font-size:13px; font-weight:600; padding:0 6px;" data-i18n="enabledAccounts">Enabled accounts</legend>
-            <div id="accountCheckboxes" style="display:grid; gap:6px; max-height:200px; overflow-y:auto;">
-              <span class="muted" data-i18n="loadAccountsPrompt">Click "Load status" to list accounts.</span>
+      <aside class="sidebar">
+        <section class="panel">
+          <h2><span class="dot"></span><span data-i18n="connection">Connection</span></h2>
+          <div class="field-stack">
+            <label class="field"><span data-i18n="managementKey">CPA management key</span>
+              <input id="managementKey" type="password" autocomplete="off" spellcheck="false">
+            </label>
+            <div class="actions">
+              <button id="load" type="button" class="primary" data-i18n="load">Load status</button>
             </div>
-          </fieldset>
-          <div class="actions">
-            <button id="saveSettings" type="button" data-i18n="save">Save settings</button>
           </div>
-        </div>
-      </section>
-      <section>
-        <div id="statsPanel" class="panel" style="margin-bottom:16px; display:none;">
-          <h2 data-i18n="resetStats">Reset Statistics</h2>
+        </section>
+        <section class="panel">
+          <h2><span class="dot"></span><span data-i18n="settings">Settings</span></h2>
+          <div class="field-stack">
+            <label class="field"><span data-i18n="refreshInterval">Refresh interval</span>
+              <input id="refreshInterval" placeholder="12h" spellcheck="false">
+            </label>
+            <label class="field"><span data-i18n="triggerLeadTime">Trigger lead time</span>
+              <input id="triggerLeadTime" placeholder="6h" spellcheck="false">
+            </label>
+            <div>
+              <div style="font-size:12px; font-weight:600; margin-bottom:6px;" data-i18n="enabledAccounts">Enabled accounts</div>
+              <div id="accountCheckboxes" class="acct-list">
+                <span class="muted" data-i18n="loadAccountsPrompt">Click "Load status" to list accounts.</span>
+              </div>
+            </div>
+            <div class="actions">
+              <button id="saveSettings" type="button" class="primary" data-i18n="save">Save settings</button>
+            </div>
+          </div>
+        </section>
+      </aside>
+      <section class="main">
+        <div id="statsPanel" class="panel" style="display:none;">
+          <h2><span class="dot"></span><span data-i18n="resetStats">Reset Statistics</span></h2>
           <div id="statsContent"></div>
         </div>
-        <div id="accounts"><p class="muted" data-i18n="loadPrompt">Enter the CPA management key and click Load status.</p></div>
-        <div class="panel" style="margin-top:16px;">
-          <h2 data-i18n="logs">Logs</h2>
+        <div id="accounts">
+          <div class="panel empty" data-i18n="loadPrompt">Enter the CPA management key and click Load status.</div>
+        </div>
+        <div class="panel">
+          <h2><span class="dot"></span><span data-i18n="logs">Logs</span></h2>
           <div id="logs" class="log"><span class="muted">-</span></div>
         </div>
       </section>
     </div>
-  </main>
+  </div>
   <script>
     const I18N = {
       en: {
         title: "Codex Auto Reset",
         connection: "Connection",
+        settings: "Settings",
         managementKey: "CPA management key",
         load: "Load status",
         refresh: "Refresh",
@@ -484,6 +708,7 @@ func renderStatusHTML(state *PluginState) string {
         reset: "Reset now",
         creditsAvail: "Credits available",
         weeklyRemain: "Weekly remaining",
+        weeklyProgress: "Weekly quota",
         nextExpiry: "Next credit expiry",
         nextState: "Next",
         lastCycle: "Last cycle",
@@ -491,13 +716,19 @@ func renderStatusHTML(state *PluginState) string {
         neverExpires: "never expires",
         expired: "expired",
         resetStats: "Reset Statistics",
+        totalSuccess: "Total success",
+        totalFail: "Total fail",
+        recovered: "Recovered quota",
+        thisWeek: "This week",
         settingsSaved: "Settings saved.",
         confirmReset: "Force a reset cycle for this account now?",
-        keyRequired: "Management key is required."
+        keyRequired: "Management key is required.",
+        times: ""
       },
       zh: {
         title: "Codex \u81ea\u52a8\u91cd\u7f6e",
         connection: "\u8fde\u63a5",
+        settings: "\u8bbe\u7f6e",
         managementKey: "CPA \u7ba1\u7406\u5bc6\u94a5",
         load: "\u52a0\u8f7d\u72b6\u6001",
         refresh: "\u5237\u65b0",
@@ -514,6 +745,7 @@ func renderStatusHTML(state *PluginState) string {
         reset: "\u7acb\u5373\u91cd\u7f6e",
         creditsAvail: "\u53ef\u7528\u91cd\u7f6e\u6b21\u6570",
         weeklyRemain: "\u5468\u989d\u5ea6\u5269\u4f59",
+        weeklyProgress: "\u5468\u989d\u5ea6",
         nextExpiry: "\u4e0b\u4e00\u4e2a\u4fe1\u7528\u989d\u5ea6\u8fc7\u671f",
         nextState: "\u4e0b\u4e00\u8f6e",
         lastCycle: "\u4e0a\u4e00\u8f6e",
@@ -521,9 +753,14 @@ func renderStatusHTML(state *PluginState) string {
         neverExpires: "\u6c38\u4e0d\u8fc7\u671f",
         expired: "\u5df2\u8fc7\u671f",
         resetStats: "\u91cd\u7f6e\u7edf\u8ba1",
+        totalSuccess: "\u7d2f\u8ba1\u6210\u529f",
+        totalFail: "\u7d2f\u8ba1\u5931\u8d25",
+        recovered: "\u6062\u590d\u989d\u5ea6",
+        thisWeek: "\u672c\u5468\u6210\u529f",
         settingsSaved: "\u8bbe\u7f6e\u5df2\u4fdd\u5b58\u3002",
         confirmReset: "\u7acb\u5373\u5bf9\u8be5\u8d26\u53f7\u89e6\u53d1\u4e00\u6b21\u91cd\u7f6e\u6d41\u7a0b\uff1f",
-        keyRequired: "\u9700\u8981\u7ba1\u7406\u5bc6\u94a5\u3002"
+        keyRequired: "\u9700\u8981\u7ba1\u7406\u5bc6\u94a5\u3002",
+        times: "\u6b21"
       }
     };
     function t(k) {
@@ -533,6 +770,11 @@ func renderStatusHTML(state *PluginState) string {
     function applyI18n() {
       for (const el of document.querySelectorAll('[data-i18n]')) {
         el.textContent = t(el.dataset.i18n);
+      }
+      const loc = document.getElementById('locale').value;
+      for (const btn of document.querySelectorAll('#localeSwitch button')) {
+        if (btn.dataset.locale === loc) { btn.classList.add('active'); }
+        else { btn.classList.remove('active'); }
       }
     }
     function authHeaders() {
@@ -582,16 +824,16 @@ func renderStatusHTML(state *PluginState) string {
       if (!records || records.length === 0) return '';
       var zh = document.getElementById('locale').value === 'zh';
       var lines = records.map(function (r) {
-        var icon = r.success ? '✅' : '❌';
+        var icon = r.success ? '\u2705' : '\u274c';
         var time = fmtTime(r.timestamp);
         var quota = (r.pre_weekly_pct != null && r.post_weekly_pct != null)
-          ? r.pre_weekly_pct + '%→' + r.post_weekly_pct + '%'
-          : '—';
-        var label = zh ? '重置' : 'reset';
-        return '<div style="font-size:11px; padding-left:12px;">' + icon + ' ' + time + ' ' + label + ': ' + escapeHTML(quota) + '</div>';
+          ? r.pre_weekly_pct + '%\u2192' + r.post_weekly_pct + '%'
+          : '\u2014';
+        var label = zh ? '\u91cd\u7f6e' : 'reset';
+        return '<div class="history-line">' + icon + ' ' + escapeHTML(time) + ' ' + escapeHTML(label) + ': ' + escapeHTML(quota) + '</div>';
       }).join('');
-      return '<div style="margin-top:6px; padding-top:6px; border-top:1px solid color-mix(in srgb,CanvasText 8%,Canvas 92%);">' +
-        '<span class="k" style="font-size:11px;">' + escapeHTML(zh ? '重置历史' : 'Reset history') + '</span>' +
+      return '<div class="history">' +
+        '<span class="k">' + escapeHTML(zh ? '\u91cd\u7f6e\u5386\u53f2' : 'Reset history') + '</span>' +
         lines + '</div>';
     }
 
@@ -622,11 +864,20 @@ func renderStatusHTML(state *PluginState) string {
       });
 
       var zh = document.getElementById('locale').value === 'zh';
-      var html = '<div class="kv">' +
-        '<span class="k">' + (zh ? '累计成功' : 'Total success') + '</span><span style="font-weight:700; color:#15803d;">' + totalSuccess + (zh ? ' 次' : '') + '</span>' +
-        '<span class="k">' + (zh ? '累计失败' : 'Total fail') + '</span><span style="font-weight:700; ' + (totalFail > 0 ? 'color:#dc2626;' : '') + '">' + totalFail + (zh ? ' 次' : '') + '</span>' +
-        '<span class="k">' + (zh ? '恢复额度' : 'Recovered') + '</span><span style="font-weight:700;">+' + totalRecovered + '%</span>' +
-        '<span class="k">' + (zh ? '本周成功' : 'This week') + '</span><span>' + weekSuccess + (zh ? ' 次' : '') + '</span>' +
+      var unit = zh ? '\u6b21' : '';
+      var html = '<div class="stats-grid">' +
+        '<div class="stat success"><div class="stat-label">' + escapeHTML(t('totalSuccess')) + '</div>' +
+        '<div class="stat-value">' + totalSuccess + '</div>' +
+        '<div class="stat-sub">' + escapeHTML(t('thisWeek')) + ': ' + weekSuccess + unit + '</div></div>' +
+        '<div class="stat danger"><div class="stat-label">' + escapeHTML(t('totalFail')) + '</div>' +
+        '<div class="stat-value">' + totalFail + '</div>' +
+        '<div class="stat-sub">&nbsp;</div></div>' +
+        '<div class="stat primary"><div class="stat-label">' + escapeHTML(t('recovered')) + '</div>' +
+        '<div class="stat-value">+' + totalRecovered + '%</div>' +
+        '<div class="stat-sub">&nbsp;</div></div>' +
+        '<div class="stat"><div class="stat-label">' + escapeHTML(t('resetStats')) + '</div>' +
+        '<div class="stat-value">' + history.length + '</div>' +
+        '<div class="stat-sub">' + escapeHTML(zh ? '\u603b\u8bb0\u5f55' : 'total records') + '</div></div>' +
         '</div>';
       content.innerHTML = html;
     }
@@ -634,26 +885,25 @@ func renderStatusHTML(state *PluginState) string {
     function describeNextAction(state, nextAt) {
       const zh = document.getElementById('locale').value === 'zh';
       const time = nextAt && !nextAt.startsWith('0001-') ? fmtTime(nextAt) : '';
-      const prefix = zh ? '下一轮' : 'Next';
       switch (state) {
         case 'IDLE':
           return zh
-            ? (time ? '下一轮检查将在 ' + time + ' 发生（巡查重置次数）' : '等待调度')
+            ? (time ? '\u4e0b\u4e00\u8f6e\u68c0\u67e5\u5c06\u5728 ' + time + ' \u53d1\u751f\uff08\u5de1\u67e5\u91cd\u7f6e\u6b21\u6570\uff09' : '\u7b49\u5f85\u8c03\u5ea6')
             : (time ? 'next patrol at ' + time + ' (check credits)' : 'pending');
         case 'ARMED':
           return zh
-            ? (time ? '将在 ' + time + ' 触发重置（进入确认流程）' : '即将触发')
+            ? (time ? '\u5c06\u5728 ' + time + ' \u89e6\u53d1\u91cd\u7f6e\uff08\u8fdb\u5165\u786e\u8ba4\u6d41\u7a0b\uff09' : '\u5373\u5c06\u89e6\u53d1')
             : (time ? 'trigger at ' + time + ' (enter confirm)' : 'imminent');
         case 'CONFIRMING':
-          return zh ? '正在二次确认，准备发送重置请求' : 'confirming before reset';
+          return zh ? '\u6b63\u5728\u4e8c\u6b21\u786e\u8ba4\uff0c\u51c6\u5907\u53d1\u9001\u91cd\u7f6e\u8bf7\u6c42' : 'confirming before reset';
         case 'RESETTING':
-          return zh ? '已发送重置请求，等待响应' : 'reset request sent, awaiting response';
+          return zh ? '\u5df2\u53d1\u9001\u91cd\u7f6e\u8bf7\u6c42\uff0c\u7b49\u5f85\u54cd\u5e94' : 'reset request sent, awaiting response';
         case 'VERIFYING':
-          return zh ? (time ? '将在 ' + time + ' 验证重置结果' : '正在验证') : (time ? 'verify at ' + time : 'verifying');
+          return zh ? (time ? '\u5c06\u5728 ' + time + ' \u9a8c\u8bc1\u91cd\u7f6e\u7ed3\u679c' : '\u6b63\u5728\u9a8c\u8bc1') : (time ? 'verify at ' + time : 'verifying');
         case 'DONE':
-          return zh ? '本轮完成，即将恢复巡查' : 'cycle complete, resuming patrol';
+          return zh ? '\u672c\u8f6e\u5b8c\u6210\uff0c\u5373\u5c06\u6062\u590d\u5de1\u67e5' : 'cycle complete, resuming patrol';
         default:
-          return zh ? '未知状态' : 'unknown';
+          return zh ? '\u672a\u77e5\u72b6\u6001' : 'unknown';
       }
     }
 
@@ -676,7 +926,7 @@ func renderStatusHTML(state *PluginState) string {
       const accts = (status && status.accounts) || {};
       const ids = Object.keys(accts);
       if (ids.length === 0) {
-        box.innerHTML = '<p class="muted">' + escapeHTML(t('noAccounts')) + '</p>';
+        box.innerHTML = '<div class="panel empty">' + escapeHTML(t('noAccounts')) + '</div>';
         return;
       }
       // Build per-account last-log lookup: most recent entry per scope.
@@ -690,9 +940,26 @@ func renderStatusHTML(state *PluginState) string {
         const state = a.state || 'IDLE';
         const snap = a.last_snapshot || (a.attempt && a.attempt.pre_snapshot) || {};
         const credits = snap.available_count == null ? '-' : snap.available_count;
-        const weekly = snap.weekly_pct == null || snap.weekly_pct < 0 ? '-' : snap.weekly_pct + '%';
+        const weeklyPct = (typeof snap.weekly_pct === 'number' && snap.weekly_pct >= 0) ? snap.weekly_pct : null;
+        const weekly = weeklyPct == null ? '-' : weeklyPct + '%';
         const nextAt = a.next_wake || '';
         const displayName = escapeHTML(accountNameMap[id] || id);
+
+        // Weekly progress bar.
+        var fillClass = 'unknown';
+        var fillWidth = 0;
+        if (weeklyPct != null) {
+          fillWidth = Math.max(0, Math.min(100, weeklyPct));
+          if (weeklyPct >= 50) fillClass = '';
+          else if (weeklyPct >= 20) fillClass = 'warn';
+          else fillClass = 'danger';
+        }
+        var progressHtml =
+          '<div class="progress">' +
+          '<div class="progress-head"><span class="k">' + escapeHTML(t('weeklyProgress')) + '</span>' +
+          '<span class="v">' + escapeHTML(weekly) + '</span></div>' +
+          '<div class="progress-track"><div class="progress-fill ' + fillClass + '" style="width:' + fillWidth + '%;"></div></div>' +
+          '</div>';
 
         // Credit list: ID + YYYY-MM-DD HH:MM:SS + remaining + target marker.
         let creditListHtml = '';
@@ -701,42 +968,52 @@ func renderStatusHTML(state *PluginState) string {
             const xe = x.expires_at || '9999', ye = y.expires_at || '9999';
             return xe.localeCompare(ye);
           });
-          creditListHtml = sorted.map(function (c, idx) {
+          creditListHtml = '<div class="credit-list">' + sorted.map(function (c, idx) {
             const cid = escapeHTML(shortCreditID(c.id));
-            const expiryStr = c.expires_at ? fmtExpiryCompact(c.expires_at) : '—';
+            const expiryStr = c.expires_at ? fmtExpiryCompact(c.expires_at) : '\u2014';
             const remain = c.expires_at ? fmtRemainLocalized(c.expires_at) : t('neverExpires');
-            const isTarget = idx === 0 ? ' <span class="muted" style="font-size:10px;">← target</span>' : '';
-            return '<div style="font-size:12px; padding-left:12px;">• ' + cid + ' <span class="muted">' + escapeHTML(expiryStr) + '</span> ' + escapeHTML(remain) + isTarget + '</div>';
-          }).join('');
+            const isTarget = idx === 0 ? ' <span class="muted" style="font-size:10px;">\u2190 target</span>' : '';
+            return '<div class="credit-line">\u2022 <span class="cid">' + cid + '</span> ' +
+              '<span class="muted">' + escapeHTML(expiryStr) + '</span> ' +
+              escapeHTML(remain) + isTarget + '</div>';
+          }).join('') + '</div>';
         } else {
-          creditListHtml = '<div class="muted" style="font-size:12px; padding-left:12px;">—</div>';
+          creditListHtml = '<div class="credit-list"><div class="credit-line muted">\u2014</div></div>';
         }
+
+        // Mini stat tiles.
+        var tilesHtml =
+          '<div class="card-row">' +
+          '<div class="mini-stat"><div class="k">' + escapeHTML(t('creditsAvail')) + '</div>' +
+          '<div class="v">' + escapeHTML(String(credits)) + '</div></div>' +
+          '<div class="mini-stat"><div class="k">' + escapeHTML(t('weeklyRemain')) + '</div>' +
+          '<div class="v">' + escapeHTML(weekly) + '</div></div>' +
+          '</div>';
 
         // Last log line for this account.
         const lastLog = lastLogByScope[id];
-        const lastMsg = lastLog ? escapeHTML(translateLog(lastLog.message)) : '—';
+        const lastMsg = lastLog ? escapeHTML(translateLog(lastLog.message)) : '\u2014';
         // Determine next action description based on state.
         const nextDesc = describeNextAction(state, nextAt);
 
         // Combined last+next panel with tinted background.
         const statusPanel =
-          '<div class="next" style="margin-top:6px; font-size:12px; padding:8px 10px; border-radius:4px; background:color-mix(in srgb,#2563eb 6%,Canvas 94%);" data-next="' + escapeHTML(nextAt) + '">' +
-          '<div>• <span class="k">' + escapeHTML(t('lastCycle')) + '</span> ' + lastMsg + '</div>' +
-          '<div style="margin-top:3px;">• ' + nextDesc + ' <span class="countdown-text muted"></span></div>' +
+          '<div class="next" data-next="' + escapeHTML(nextAt) + '">' +
+          '<div class="row"><span class="k">' + escapeHTML(t('lastCycle')) + ':</span> ' + lastMsg + '</div>' +
+          '<div class="row"><span class="k">' + escapeHTML(t('nextState')) + ':</span> ' + escapeHTML(nextDesc) +
+          ' <span class="countdown countdown-text muted"></span></div>' +
           '</div>';
 
-        return '<div class="card">' +
+        return '<div class="acct-card">' +
           '<div class="card-head"><span class="auth-id">' + displayName + '</span>' +
           '<span class="state-badge ' + escapeHTML(state) + '">' + escapeHTML(state) + '</span></div>' +
-          '<div class="kv">' +
-          '<span class="k">' + escapeHTML(t('weeklyRemain')) + '</span><span>' + escapeHTML(weekly) + '</span>' +
-          '<span class="k">' + escapeHTML(t('creditsAvail')) + '</span><span>' + escapeHTML(String(credits)) + '</span>' +
-          '</div>' +
+          progressHtml +
+          tilesHtml +
           creditListHtml +
           statusPanel +
           renderCardHistory(historyByAcct[id]) +
-          '<div class="actions" style="margin-top:8px;">' +
-          '<button class="check-btn" data-auth="' + escapeHTML(id) + '">' + escapeHTML(t('check')) + '</button>' +
+          '<div class="card-actions">' +
+          '<button class="check-btn primary" data-auth="' + escapeHTML(id) + '">' + escapeHTML(t('check')) + '</button>' +
           '<button class="secondary reset-btn" data-auth="' + escapeHTML(id) + '">' + escapeHTML(t('reset')) + '</button>' +
           '</div>' +
           '</div>';
@@ -761,7 +1038,7 @@ func renderStatusHTML(state *PluginState) string {
     // fmtExpiryCompact renders an ISO timestamp as YYYY-MM-DD HH:MM:SS
     // (full readable date for credit expiry display).
     function fmtExpiryCompact(iso) {
-      if (!iso || iso.startsWith('0001-')) return '—';
+      if (!iso || iso.startsWith('0001-')) return '\u2014';
       const d = new Date(iso);
       if (isNaN(d)) return iso;
       const yyyy = d.getFullYear();
@@ -774,16 +1051,16 @@ func renderStatusHTML(state *PluginState) string {
     }
 
     // shortCreditID extracts the hex prefix from a RateLimitResetCredit ID.
-    // "RateLimitResetCredit_d7087f83469c819182a87d5916512c9c" -> "d7087f83…"
+    // "RateLimitResetCredit_d7087f83469c819182a87d5916512c9c" -> "d7087f83..."
     function shortCreditID(id) {
       if (!id) return '';
       const prefix = 'RateLimitResetCredit_';
       var s = id.startsWith(prefix) ? id.substring(prefix.length) : id;
-      return s.length > 10 ? s.substring(0, 8) + '…' : s;
+      return s.length > 10 ? s.substring(0, 8) + '\u2026' : s;
     }
 
     // fmtRemainLocalized renders remaining time in the selected language:
-    // ZH: "8天9小时", EN: "8d 9h".
+    // ZH: "8 days 9 hours", EN: "8d 9h".
     function fmtRemainLocalized(iso) {
       if (!iso || iso.startsWith('0001-')) return t('neverExpires');
       const d = new Date(iso);
@@ -794,14 +1071,14 @@ func renderStatusHTML(state *PluginState) string {
       const hours = Math.floor((ms % 86400000) / 3600000);
       const mins = Math.floor((ms % 3600000) / 60000);
       const zh = document.getElementById('locale').value === 'zh';
-      const dayUnit = zh ? '天' : 'd';
-      const hourUnit = zh ? '小时' : 'h';
-      const minUnit = zh ? '分' : 'm';
+      const dayUnit = zh ? '\u5929' : 'd';
+      const hourUnit = zh ? '\u5c0f\u65f6' : 'h';
+      const minUnit = zh ? '\u5206' : 'm';
       const parts = [];
       if (days > 0) parts.push(days + dayUnit);
       if (hours > 0) parts.push(hours + hourUnit);
       if (days === 0 && hours === 0 && mins > 0) parts.push(mins + minUnit);
-      return parts.join(zh ? '' : ' ') || (zh ? '不到1分' : '<1m');
+      return parts.join(zh ? '' : ' ') || (zh ? '\u4e0d\u52301\u5206' : '<1m');
     }
     // translateLog converts an English FSM log message to the selected UI
     // language. Uses regex replacements for the common patterns so the
@@ -815,33 +1092,33 @@ func renderStatusHTML(state *PluginState) string {
       };
       let z = msg;
       const rules = [
-        [/no available credits/g, '未发现可用重置次数'],
-        [/credit ([a-f0-9…]*) expires in ([^;]+); not near trigger window \(will arm ([^)]+) before expiry[^)]*\)/g,
-         '重置次数 $1 将在 $2 后过期；尚未进入触发窗口（将在过期前 $3 进入 ARMED）'],
-        [/credit ([a-f0-9…]*) expires in ([^;]+); not near trigger window.*/g,
-         '重置次数 $1 将在 $2 后过期；尚未进入触发窗口'],
-        [/credit ([a-f0-9…]*) armed; will reset at ([^ ]+) \(expiry in ([^)]+)\)/g,
-         '重置次数 $1 已进入 ARMED；将在 $2 触发重置（过期前还有 $3）'],
-        [/trigger time reached, confirming before reset/g, '触发时间已到，正在确认后重置'],
-        [/confirmed target credit ([a-f0-9…]*) \(weekly was (\d+%%)\); sending reset request/g,
-         '已确认目标重置次数 $1（周额度 $2）；正在发送重置请求'],
-        [/reset request accepted \(code=([^,]+), windows_reset=(\d+)\); will verify in ([^)]+)/g,
-         '重置请求已接受（code=$1，重置窗口=$2）；$3 后验证'],
-        [/reset stopped: server returned (.+)/g, '重置已停止：服务端返回 $1'],
-        [/reset stopped: (.+)/g, '重置已停止：$1'],
+        [/no available credits/g, '\u672a\u53d1\u73b0\u53ef\u7528\u91cd\u7f6e\u6b21\u6570'],
+        [/credit ([a-f0-9\u2026]*) expires in ([^;]+); not near trigger window \(will arm ([^)]+) before expiry[^)]*\)/g,
+         '\u91cd\u7f6e\u6b21\u6570 $1 \u5c06\u5728 $2 \u540e\u8fc7\u671f\uff1b\u5c1a\u672a\u8fdb\u5165\u89e6\u53d1\u7a97\u53e3\uff08\u5c06\u5728\u8fc7\u671f\u524d $3 \u8fdb\u5165 ARMED\uff09'],
+        [/credit ([a-f0-9\u2026]*) expires in ([^;]+); not near trigger window.*/g,
+         '\u91cd\u7f6e\u6b21\u6570 $1 \u5c06\u5728 $2 \u540e\u8fc7\u671f\uff1b\u5c1a\u672a\u8fdb\u5165\u89e6\u53d1\u7a97\u53e3'],
+        [/credit ([a-f0-9\u2026]*) armed; will reset at ([^ ]+) \(expiry in ([^)]+)\)/g,
+         '\u91cd\u7f6e\u6b21\u6570 $1 \u5df2\u8fdb\u5165 ARMED\uff1b\u5c06\u5728 $2 \u89e6\u53d1\u91cd\u7f6e\uff08\u8fc7\u671f\u524d\u8fd8\u6709 $3\uff09'],
+        [/trigger time reached, confirming before reset/g, '\u89e6\u53d1\u65f6\u95f4\u5df2\u5230\uff0c\u6b63\u5728\u786e\u8ba4\u540e\u91cd\u7f6e'],
+        [/confirmed target credit ([a-f0-9\u2026]*) \(weekly was (\d+%%)\); sending reset request/g,
+         '\u5df2\u786e\u8ba4\u76ee\u6807\u91cd\u7f6e\u6b21\u6570 $1\uff08\u5468\u989d\u5ea6 $2\uff09\uff1b\u6b63\u5728\u53d1\u9001\u91cd\u7f6e\u8bf7\u6c42'],
+        [/reset request accepted \(code=([^,]+), windows_reset=(\d+)\); will verify in ([^)]+)\)/g,
+         '\u91cd\u7f6e\u8bf7\u6c42\u5df2\u63a5\u53d7\uff08code=$1\uff0c\u91cd\u7f6e\u7a97\u53e3=$2\uff09\uff1b$3 \u540e\u9a8c\u8bc1'],
+        [/reset stopped: server returned (.+)/g, '\u91cd\u7f6e\u5df2\u505c\u6b62\uff1a\u670d\u52a1\u7aef\u8fd4\u56de $1'],
+        [/reset stopped: (.+)/g, '\u91cd\u7f6e\u5df2\u505c\u6b62\uff1a$1'],
         [/reset failed \(attempt (\d+)\): (.+); retrying with same idempotency key/g,
-         '重置失败（第 $1 次）：$2；使用相同幂等键重试'],
+         '\u91cd\u7f6e\u5931\u8d25\uff08\u7b2c $1 \u6b21\uff09\uff1a$2\uff1b\u4f7f\u7528\u76f8\u540c\u5e42\u7b49\u952e\u91cd\u8bd5'],
         [/retries exhausted after (\d+) attempts; last error: (.+)/g,
-         '重试 $1 次后放弃；最后错误：$2'],
-        [/reset verified: credits (\d+)→(\d+), weekly (\d+%%)→(\d+%%)/g,
-         '重置验证通过：重置次数 $1→$2，周额度 $3→$4'],
-        [/reset partial: credits ok but weekly (\d+%%)→(\d+%%) \(delayed\?\)/g,
-         '重置部分完成：次数已扣但周额度 $1→$2（延迟？）'],
-        [/verification mismatch: target gone=(\w+), count-1=(\w+), quota up=(\w+) — halted/g,
-         '验证不匹配：目标已扣=$1，次数-1=$2，额度回升=$3 —— 已停止'],
-        [/verification failed: (.+)/g, '验证失败：$1'],
-        [/target credit vanished before reset/g, '目标重置次数在重置前已消失'],
-        [/armed wake at T, confirming/g, '触发时间已到，正在确认'],
+         '\u91cd\u8bd5 $1 \u6b21\u540e\u653e\u5f03\uff1b\u6700\u540e\u9519\u8bef\uff1a$2'],
+        [/reset verified: credits (\d+)\u2192(\d+), weekly (\d+%%)\u2192(\d+%%)/g,
+         '\u91cd\u7f6e\u9a8c\u8bc1\u901a\u8fc7\uff1a\u91cd\u7f6e\u6b21\u6570 $1\u2192$2\uff0c\u5468\u989d\u5ea6 $3\u2192$4'],
+        [/reset partial: credits ok but weekly (\d+%%)\u2192(\d+%%) \(delayed\?\)/g,
+         '\u91cd\u7f6e\u90e8\u5206\u5b8c\u6210\uff1a\u6b21\u6570\u5df2\u6263\u4f46\u5468\u989d\u5ea6 $1\u2192$2\uff08\u5ef6\u8fdf\uff1f\uff09'],
+        [/verification mismatch: target gone=(\w+), count-1=(\w+), quota up=(\w+) \u2014 halted/g,
+         '\u9a8c\u8bc1\u4e0d\u5339\u914d\uff1a\u76ee\u6807\u5df2\u6263=$1\uff0c\u6b21\u6570-1=$2\uff0c\u989d\u5ea6\u56de\u5347=$3 \u2014\u2014 \u5df2\u505c\u6b62'],
+        [/verification failed: (.+)/g, '\u9a8c\u8bc1\u5931\u8d25\uff1a$1'],
+        [/target credit vanished before reset/g, '\u76ee\u6807\u91cd\u7f6e\u6b21\u6570\u5728\u91cd\u7f6e\u524d\u5df2\u6d88\u5931'],
+        [/armed wake at T, confirming/g, '\u89e6\u53d1\u65f6\u95f4\u5df2\u5230\uff0c\u6b63\u5728\u786e\u8ba4'],
       ];
       for (const r of rules) {
         z = z.replace(r[0], r[1]);
@@ -865,7 +1142,7 @@ func renderStatusHTML(state *PluginState) string {
       }).join('');
     }
     // accountNameMap caches auth_index -> human-readable name from /accounts,
-    // so the right-panel cards can show "codex-44411af1-…-team.json" instead
+    // so the right-panel cards can show "codex-44411af1-...-team.json" instead
     // of the raw hex auth_index.
     var accountNameMap = {};
 
@@ -894,15 +1171,15 @@ func renderStatusHTML(state *PluginState) string {
     function renderAccountCheckboxes(accts) {
       var box = document.getElementById('accountCheckboxes');
       if (!accts || accts.length === 0) {
-        box.innerHTML = '<label style="font-size:12px;" class="muted">' + escapeHTML(t('noAccountsFound')) + '</label>';
+        box.innerHTML = '<span class="muted">' + escapeHTML(t('noAccountsFound')) + '</span>';
         return;
       }
       box.innerHTML = accts.map(function (a) {
         var checked = a.enabled ? ' checked' : '';
         // a.name is already the most informative label (ID/file name preferred).
         var label = escapeHTML(a.name || a.email || a.auth_index);
-        return '<label style="display:flex; align-items:center; gap:8px; font-size:13px; font-weight:500;">' +
-               '<input type="checkbox" class="acct-checkbox" value="' + escapeHTML(a.auth_index) + '"' + checked + ' style="width:auto; margin:0;">' +
+        return '<label class="acct-item">' +
+               '<input type="checkbox" class="acct-checkbox" value="' + escapeHTML(a.auth_index) + '"' + checked + '>' +
                '<span>' + label + '</span></label>';
       }).join('');
     }
@@ -937,6 +1214,14 @@ func renderStatusHTML(state *PluginState) string {
         document.getElementById('locale').value = (navigator.language || '').toLowerCase().indexOf('zh') === 0 ? 'zh' : 'en';
       }
       document.getElementById('locale').addEventListener('change', function () {
+        localStorage.setItem('codex-auto-reset-locale', document.getElementById('locale').value);
+        applyI18n();
+      });
+      // Locale switch buttons drive the hidden <select> so all listeners stay wired.
+      document.getElementById('localeSwitch').addEventListener('click', function (ev) {
+        const target = ev.target;
+        if (!(target instanceof Element) || target.tagName !== 'BUTTON') return;
+        document.getElementById('locale').value = target.dataset.locale || 'en';
         localStorage.setItem('codex-auto-reset-locale', document.getElementById('locale').value);
         applyI18n();
       });

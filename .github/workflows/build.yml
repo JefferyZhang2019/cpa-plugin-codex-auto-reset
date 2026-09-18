@@ -236,7 +236,7 @@ jobs:
 
   release:
     name: Release
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: ${{ !failure() && !cancelled() && startsWith(github.ref, 'refs/tags/v') }}
     needs:
       - build
       - build-windows-arm64

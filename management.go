@@ -70,6 +70,8 @@ func (h *managementHandlers) handle(method, rawPath string, headers http.Header,
 	case method == http.MethodGet && path == "/accounts":
 		st, b := h.accountsJSON()
 		return st, b, "application/json"
+	case method == http.MethodGet && path == "/debug/auth-list":
+		return h.debugAuthList()
 	case method == http.MethodGet && path == "/debug/usage":
 		return h.debugUsage()
 	case method == http.MethodGet && path == "/logs":
@@ -192,6 +194,53 @@ func (h *managementHandlers) debugUsage() (int, []byte, string) {
 		return st, b, "application/json"
 	}
 	return http.StatusOK, body, "application/json"
+}
+
+// debugAuthList dumps the raw host.auth.list result with per-entry filter
+// diagnostics, so a remote deployment can see exactly why accounts are or
+// aren't matching the codex filter.
+func (h *managementHandlers) debugAuthList() (int, []byte, string) {
+	auths, err := listAuthsViaHost()
+	if err != nil {
+		st, b := jsonStatus(http.StatusBadGateway, map[string]any{"error": "host.auth.list: " + err.Error()})
+		return st, b, "application/json"
+	}
+	type diag struct {
+		ID          string `json:"id"`
+		AuthIndex   string `json:"auth_index"`
+		Provider    string `json:"provider"`
+		Type        string `json:"type"`
+		Name        string `json:"name"`
+		Email       string `json:"email"`
+		Disabled    bool   `json:"disabled"`
+		Unavailable bool   `json:"unavailable"`
+		MatchesCodex bool  `json:"matches_codex"`
+		Skipped     string `json:"skipped_reason,omitempty"`
+	}
+	out := make([]diag, 0, len(auths))
+	for _, a := range auths {
+		d := diag{
+			ID:          a.ID,
+			AuthIndex:   a.AuthIndex,
+			Provider:    a.Provider,
+			Type:        a.Type,
+			Name:        a.Name,
+			Email:       a.Email,
+			Disabled:    a.Disabled,
+			Unavailable: a.Unavailable,
+		}
+		if strings.EqualFold(a.Provider, "codex") || strings.EqualFold(a.Type, "codex") {
+			d.MatchesCodex = true
+			if a.Disabled || a.Unavailable {
+				d.Skipped = "disabled/unavailable"
+			}
+		} else {
+			d.Skipped = "provider/type not codex"
+		}
+		out = append(out, d)
+	}
+	st, b := jsonOK(map[string]any{"total": len(auths), "entries": out})
+	return st, b, "application/json"
 }
 
 func (h *managementHandlers) accountsJSON() (int, []byte) {

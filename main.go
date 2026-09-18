@@ -448,6 +448,7 @@ func managementRegistrationResponse() pluginapi.ManagementRegistrationResponse {
 	routes := []pluginapi.ManagementRoute{
 		{Method: http.MethodGet, Path: "/plugins/codex-auto-reset/status"},
 		{Method: http.MethodGet, Path: "/plugins/codex-auto-reset/accounts"},
+		{Method: http.MethodGet, Path: "/plugins/codex-auto-reset/debug/auth-list"},
 		{Method: http.MethodGet, Path: "/plugins/codex-auto-reset/debug/usage"},
 		{Method: http.MethodGet, Path: "/plugins/codex-auto-reset/logs"},
 		{Method: http.MethodPut, Path: "/plugins/codex-auto-reset/settings"},

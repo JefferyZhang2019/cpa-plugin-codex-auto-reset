@@ -167,9 +167,14 @@ jobs:
             dist/${{ env.ARCHIVE_NAME }}.sha256
           if-no-files-found: error
 
+  # FreeBSD build disabled: the go-cross/cgo-actions@v1 action downloads
+  # FreeBSD 14.3-RELEASE base.txz, which was removed from download.freebsd.org
+  # (14.3 EOL'd; only 14.4/14.5 remain). Re-enable when the action supports
+  # a newer FreeBSD release.
   build-freebsd:
     name: Build freebsd/amd64
     needs: test
+    if: false
     runs-on: ubuntu-24.04
     defaults:
       run:

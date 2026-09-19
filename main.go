@@ -278,6 +278,15 @@ func configurePlugin(raw []byte) error {
 
 	// Load persisted state if present; otherwise seed with config-derived defaults.
 	statePath := defaultStatePath()
+	// Announce where state lives so operators know what to back up / volume-mount.
+	// Especially important for container deployments: without a volume over this
+	// path, statistics and logs are lost on every container rebuild.
+	if globalWorker != nil {
+		globalWorker.Logs().append(LogEntry{
+			Timestamp: time.Now(), Level: "info", Scope: "system",
+			Message: "state file location: " + statePath,
+		})
+	}
 	migrateLegacyState(statePath)
 	loaded, err := loadState(statePath)
 	if err != nil {

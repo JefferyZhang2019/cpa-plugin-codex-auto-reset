@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -79,5 +80,95 @@ func TestState_SaveIsAtomicViaTmpRename(t *testing.T) {
 	}
 	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
 		t.Fatalf("expected no .tmp leftover, got %v", err)
+	}
+}
+
+// TestDefaultStatePath_IsAbsoluteAndPlatformAppropriate verifies the state file
+// lives under the OS user-config dir (not CWD) so it survives CPA reinstalls:
+// Windows %APPDATA%, Linux ~/.config, macOS ~/Library/Application Support.
+func TestDefaultStatePath_IsAbsoluteAndPlatformAppropriate(t *testing.T) {
+	p := defaultStatePath()
+	if !filepath.IsAbs(p) {
+		t.Fatalf("state path should be absolute, got %q (UserConfigDir unavailable in test env?)", p)
+	}
+	// Must contain the plugin-specific segment so multiple CPA plugins don't collide.
+	if !strings.Contains(p, filepath.Join("CLIProxyAPI", "codex-auto-reset")) {
+		t.Fatalf("state path missing plugin dir segment: %q", p)
+	}
+	if filepath.Base(p) != "state.json" {
+		t.Fatalf("unexpected file name: %q", filepath.Base(p))
+	}
+}
+
+// TestMigrateLegacyState_MigratesAndKeepsBackup verifies the one-time migration
+// from the legacy CWD-relative state file to the new config-dir location.
+func TestMigrateLegacyState_MigratesAndKeepsBackup(t *testing.T) {
+	dir := t.TempDir()
+	// Create a legacy state file in CWD (chdir to temp dir for isolation).
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	legacy := &PluginState{
+		Config:       DefaultConfig(),
+		Accounts:     map[string]AccountRuntime{},
+		ResetHistory: []ResetRecord{{Timestamp: time.Now(), AuthID: "a", Success: true, PreWeeklyPct: 10, PostWeeklyPct: 100}},
+	}
+	if err := saveState("codex-auto-reset.state.json", legacy); err != nil {
+		t.Fatalf("save legacy: %v", err)
+	}
+
+	newPath := filepath.Join(dir, "new", "state.json")
+	migrateLegacyState(newPath)
+
+	// New location must contain the data.
+	got, err := loadState(newPath)
+	if err != nil {
+		t.Fatalf("load migrated: %v", err)
+	}
+	if len(got.ResetHistory) != 1 || !got.ResetHistory[0].Success {
+		t.Fatalf("migration lost reset history: %+v", got.ResetHistory)
+	}
+	// Legacy file must be renamed to .migrated (kept, not deleted).
+	if _, err := os.Stat("codex-auto-reset.state.json.migrated"); err != nil {
+		t.Fatalf("legacy backup missing: %v", err)
+	}
+}
+
+// TestMigrateLegacyState_DoesNotOverwriteExisting verifies migration is a
+// no-op when the new location already has state (e.g. re-running an upgrade).
+func TestMigrateLegacyState_DoesNotOverwriteExisting(t *testing.T) {
+	dir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	// Legacy file with 2 records.
+	legacy := &PluginState{ResetHistory: []ResetRecord{{AuthID: "legacy"}, {AuthID: "legacy2"}}}
+	if err := saveState("codex-auto-reset.state.json", legacy); err != nil {
+		t.Fatalf("save legacy: %v", err)
+	}
+	// New location with 1 record already.
+	newPath := filepath.Join(dir, "new", "state.json")
+	existing := &PluginState{ResetHistory: []ResetRecord{{AuthID: "new"}}}
+	if err := saveState(newPath, existing); err != nil {
+		t.Fatalf("save existing: %v", err)
+	}
+
+	migrateLegacyState(newPath)
+
+	got, err := loadState(newPath)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(got.ResetHistory) != 1 || got.ResetHistory[0].AuthID != "new" {
+		t.Fatalf("existing state was overwritten: %+v", got.ResetHistory)
 	}
 }

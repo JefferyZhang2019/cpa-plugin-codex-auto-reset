@@ -1260,8 +1260,30 @@ func renderStatusHTML(state *PluginState) string {
     }
     async function resetOne(id) {
       if (!confirm(t('confirmReset'))) return;
-      try { await apiSend('POST', '/v0/management/plugins/codex-auto-reset/reset', { auth_index: id }); await loadStatus(); }
+      try {
+        await apiSend('POST', '/v0/management/plugins/codex-auto-reset/reset', { auth_index: id });
+        // The worker steps the FSM asynchronously (CONFIRMING→RESETTING→VERIFYING
+        // within ~seconds). Refresh once immediately, then again after a short
+        // delay so the state transitions become visible without manual clicks.
+        await loadStatus();
+        setTimeout(loadStatus, 2000);
+        setTimeout(loadStatus, 6000);
+      }
       catch (e) { alert(e.message); }
+    }
+
+    // Auto-refresh: poll status every 15s while the page is visible and a
+    // management key has been entered, so FSM transitions (ARMED/VERIFYING/
+    // DONE) appear without manual clicks. Skips hidden tabs to save requests.
+    var autoRefreshTimer = null;
+    function startAutoRefresh() {
+      if (autoRefreshTimer) return;
+      autoRefreshTimer = setInterval(function () {
+        if (document.hidden) return;
+        const key = document.getElementById('managementKey').value.trim();
+        if (!key) return;
+        loadStatus().catch(function () {});
+      }, 15000);
     }
     function onLoad() {
       const savedLocale = localStorage.getItem('codex-auto-reset-locale');
@@ -1292,6 +1314,7 @@ func renderStatusHTML(state *PluginState) string {
         if (target.classList.contains('reset-btn')) { resetOne(target.dataset.auth || ''); return; }
       });
       applyI18n();
+      startAutoRefresh();
       setInterval(function () {
         for (const el of document.querySelectorAll('.next[data-next]')) {
           const c = countdown(el.dataset.next || '');

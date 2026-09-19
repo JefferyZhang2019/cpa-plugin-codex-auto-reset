@@ -520,6 +520,9 @@ func renderStatusHTML(state *PluginState) string {
     h2 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--primary); }
 
     label.field { display: grid; gap: 5px; font-size: 12px; font-weight: 600; color: var(--text); }
+    label.toggle { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; color: var(--text); cursor: pointer; }
+    label.toggle input[type="checkbox"] { width: auto; margin: 0; }
+    .setting-help { margin: 0; font-size: 11px; color: var(--text-muted); }
     input, select, textarea {
       width: 100%; border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
       padding: 8px 10px; background: var(--surface); color: var(--text);
@@ -702,6 +705,10 @@ func renderStatusHTML(state *PluginState) string {
             <label class="field"><span data-i18n="managementKey">CPA management key</span>
               <input id="managementKey" type="password" autocomplete="off" spellcheck="false">
             </label>
+            <label class="toggle"><span data-i18n="rememberKey">Remember management key in this browser</span>
+              <input id="rememberManagementKey" type="checkbox">
+            </label>
+            <p class="setting-help" data-i18n="rememberKeyHelp">The key is stored unencrypted in browser local storage. Enable only on a trusted device.</p>
             <div class="actions">
               <button id="load" type="button" class="primary" data-i18n="load">Load status</button>
             </div>
@@ -750,6 +757,8 @@ func renderStatusHTML(state *PluginState) string {
         connection: "Connection",
         settings: "Settings",
         managementKey: "CPA management key",
+        rememberKey: "Remember management key in this browser",
+        rememberKeyHelp: "The key is stored unencrypted in browser local storage. Enable only on a trusted device.",
         load: "Load status",
         refresh: "Refresh",
         refreshInterval: "Refresh interval",
@@ -787,6 +796,8 @@ func renderStatusHTML(state *PluginState) string {
         connection: "\u8fde\u63a5",
         settings: "\u8bbe\u7f6e",
         managementKey: "CPA \u7ba1\u7406\u5bc6\u94a5",
+        rememberKey: "\u5728\u6b64\u6d4f\u89c8\u5668\u4e2d\u8bb0\u4f4f\u7ba1\u7406\u5bc6\u94a5",
+        rememberKeyHelp: "\u5bc6\u94a5\u5c06\u4ee5\u672a\u52a0\u5bc6\u5f62\u5f0f\u4fdd\u5b58\u5728\u6d4f\u89c8\u5668\u672c\u5730\u5b58\u50a8\u4e2d\u3002\u8bf7\u4ec5\u5728\u53d7\u4fe1\u4efb\u7684\u8bbe\u5907\u4e0a\u542f\u7528\u3002",
         load: "\u52a0\u8f7d\u72b6\u6001",
         refresh: "\u5237\u65b0",
         refreshInterval: "\u5237\u65b0\u95f4\u9694",
@@ -1285,6 +1296,27 @@ func renderStatusHTML(state *PluginState) string {
         loadStatus().catch(function () {});
       }, 15000);
     }
+    // Remember-management-key helpers (pattern from codex-quota-scheduler).
+    // The key is stored unencrypted in this browser's localStorage only —
+    // never sent anywhere except as the Authorization header to CPA.
+    const MANAGEMENT_KEY_STORAGE = 'codex-auto-reset-management-key-v1';
+    function syncRememberedKey() {
+      const remember = document.getElementById('rememberManagementKey').checked;
+      const key = document.getElementById('managementKey').value.trim();
+      try {
+        if (remember && key) window.localStorage.setItem(MANAGEMENT_KEY_STORAGE, key);
+        else window.localStorage.removeItem(MANAGEMENT_KEY_STORAGE);
+      } catch (e) { /* storage unavailable — ignore */ }
+    }
+    function restoreRememberedKey() {
+      try {
+        const key = window.localStorage.getItem(MANAGEMENT_KEY_STORAGE);
+        if (!key) return;
+        document.getElementById('managementKey').value = key;
+        document.getElementById('rememberManagementKey').checked = true;
+      } catch (e) { /* ignore */ }
+    }
+
     function onLoad() {
       const savedLocale = localStorage.getItem('codex-auto-reset-locale');
       if (savedLocale === 'zh' || savedLocale === 'en') {
@@ -1305,8 +1337,16 @@ func renderStatusHTML(state *PluginState) string {
         applyI18n();
       });
       document.getElementById('refresh').addEventListener('click', loadStatus);
-      document.getElementById('load').addEventListener('click', loadStatus);
+      document.getElementById('load').addEventListener('click', function () { syncRememberedKey(); loadStatus(); });
       document.getElementById('saveSettings').addEventListener('click', saveSettings);
+      // Remember-management-key: checkbox persists the key in localStorage
+      // (unencrypted, this-browser-only). Mirrors the quota-scheduler plugin.
+      document.getElementById('rememberManagementKey').addEventListener('change', syncRememberedKey);
+      document.getElementById('managementKey').addEventListener('input', syncRememberedKey);
+      document.getElementById('managementKey').addEventListener('keydown', function (ev) {
+        if (ev.key === 'Enter') { syncRememberedKey(); loadStatus(); }
+      });
+      restoreRememberedKey();
       document.addEventListener('click', function (ev) {
         const target = ev.target;
         if (!(target instanceof Element)) return;

@@ -141,6 +141,7 @@ func (h *managementHandlers) statusJSON() (int, []byte) {
 	copy(history, h.state.ResetHistory)
 	out := map[string]any{
 		"plugin":        pluginID,
+		"version":       pluginVersion,
 		"config":        h.state.Config,
 		"accounts":      accts,
 		"reset_history": history,

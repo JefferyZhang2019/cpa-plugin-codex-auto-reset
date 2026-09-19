@@ -398,7 +398,10 @@ func listCodexAccountsForUI() ([]AccountOption, error) {
 		if !strings.EqualFold(a.Provider, "codex") && !strings.EqualFold(a.Type, "codex") {
 			continue
 		}
-		if a.Disabled || a.Unavailable {
+		// Skip only explicitly disabled accounts. Unavailable (rate-limited)
+		// accounts are the ones that NEED resets, so they must be included —
+		// the plugin talks to OpenAI directly, not through CPA's scheduler.
+		if a.Disabled {
 			continue
 		}
 		// Label preference: ID (the credential file name, e.g.

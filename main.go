@@ -53,6 +53,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -276,6 +278,7 @@ func configurePlugin(raw []byte) error {
 
 	// Load persisted state if present; otherwise seed with config-derived defaults.
 	statePath := defaultStatePath()
+	migrateLegacyState(statePath)
 	loaded, err := loadState(statePath)
 	if err != nil {
 		loaded = &PluginState{Accounts: map[string]AccountRuntime{}}
@@ -549,9 +552,40 @@ func getAuthJSONViaHost(authIndex string) (json.RawMessage, error) {
 }
 
 func defaultStatePath() string {
-	// CPA plugins persist state next to the host's state directory. We use a
-	// fixed filename so .gitignore matches (codex-auto-reset.state.json).
-	return "codex-auto-reset.state.json"
+	// State lives in the user config dir (e.g. %APPDATA%\CLIProxyAPI\codex-auto-reset	// on Windows, ~/.config/CLIProxyAPI/codex-auto-reset/ on Linux) so it survives
+	// CPA reinstalls and working-directory changes. Mirrors codex-quota-scheduler's
+	// resolveDefaultStatePath.
+	dir, err := os.UserConfigDir()
+	if err != nil || dir == "" {
+		dir = "."
+	}
+	return filepath.Join(dir, "CLIProxyAPI", "codex-auto-reset", "state.json")
+}
+
+// legacyStatePath is the pre-0.1.7 location: a relative filename resolved against
+// CPA's working directory. migrateLegacyState moves it to the new location once,
+// so statistics and logs survive the upgrade.
+func migrateLegacyState(newPath string) {
+	legacy := "codex-auto-reset.state.json"
+	if legacy == newPath {
+		return
+	}
+	raw, err := os.ReadFile(legacy)
+	if err != nil {
+		return // no legacy file — nothing to migrate
+	}
+	if _, err := os.Stat(newPath); err == nil {
+		return // new state already exists; keep it
+	}
+	var state PluginState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return
+	}
+	if err := saveState(newPath, &state); err != nil {
+		return
+	}
+	// Keep the legacy file as .migrated for safety rather than deleting it.
+	_ = os.Rename(legacy, legacy+".migrated")
 }
 
 // backfillResetHistoryFromLogs scans persisted logs for "reset verified OK" /

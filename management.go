@@ -85,7 +85,10 @@ func (h *managementHandlers) handle(method, rawPath string, headers http.Header,
 		return st, b, "application/json"
 	case method == http.MethodPost && path == "/check/all":
 		if h.worker != nil {
-			h.worker.TriggerCheck("")
+			if err := h.worker.TriggerCheck(""); err != nil {
+				st, b := jsonStatus(http.StatusBadGateway, map[string]any{"error": err.Error()})
+				return st, b, "application/json"
+			}
 		}
 		st, b := jsonOK(map[string]any{"triggered": "all"})
 		return st, b, "application/json"
@@ -330,7 +333,9 @@ func (h *managementHandlers) checkOne(body []byte) (int, []byte) {
 	}
 	_ = json.Unmarshal(body, &req)
 	if h.worker != nil {
-		h.worker.TriggerCheck(req.AuthIndex)
+		if err := h.worker.TriggerCheck(req.AuthIndex); err != nil {
+			return jsonStatus(http.StatusNotFound, map[string]any{"error": err.Error()})
+		}
 	}
 	return jsonOK(map[string]any{"triggered": req.AuthIndex})
 }
@@ -343,7 +348,9 @@ func (h *managementHandlers) resetOne(body []byte) (int, []byte) {
 		return jsonStatus(http.StatusBadRequest, map[string]any{"error": "auth_index required"})
 	}
 	if h.worker != nil {
-		h.worker.ForceConfirm(req.AuthIndex)
+		if err := h.worker.ForceConfirm(req.AuthIndex); err != nil {
+			return jsonStatus(http.StatusNotFound, map[string]any{"error": err.Error()})
+		}
 	}
 	return jsonOK(map[string]any{"forced": req.AuthIndex})
 }

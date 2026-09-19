@@ -209,3 +209,80 @@ func TestWorker_StateSyncPropagatesFSMState(t *testing.T) {
 		t.Fatalf("FSM never progressed beyond IDLE/ARMED in snapshots: %v", seenStates)
 	}
 }
+
+// TestWorker_ForceConfirmNotFound verifies ForceConfirm returns an error for an
+// unknown account instead of silently doing nothing (the old behavior made the
+// manual reset button appear to work while nothing happened).
+func TestWorker_ForceConfirmNotFound(t *testing.T) {
+	defer resetTestClock()
+	cfg := Config{RefreshInterval: 12 * time.Hour, TriggerLeadTime: 6 * time.Hour}
+	loader := func(string) (CodexCredentials, ResetClient, error) {
+		return CodexCredentials{AccessToken: "t"}, &fakeClient{}, nil
+	}
+	w := NewWorker(cfg, []string{"a"}, loader, time.Now)
+	done := make(chan struct{})
+	go func() { w.Run(); close(done) }()
+	time.Sleep(50 * time.Millisecond) // let Run() create the FSM
+	w.Stop()
+	<-done
+
+	if err := w.ForceConfirm("nonexistent"); err == nil {
+		t.Fatalf("expected error for unknown account, got nil")
+	}
+	if err := w.TriggerCheck("nonexistent"); err == nil {
+		t.Fatalf("expected error for unknown account, got nil")
+	}
+	// Known account must not error (worker stopped, but FSM map persists).
+	if err := w.ForceConfirm("a"); err != nil {
+		t.Fatalf("unexpected error for known account: %v", err)
+	}
+}
+
+// TestWorker_ManualResetImmediate verifies the manual reset (ForceConfirm) runs
+// the full cycle promptly thanks to the wake channel — no waiting for the
+// previously scheduled patrol.
+func TestWorker_ManualResetImmediate(t *testing.T) {
+	defer resetTestClock()
+	E := time.Now().Add(5 * 24 * time.Hour) // far-future expiry; nothing auto-triggers
+	cfg := Config{RefreshInterval: 12 * time.Hour, TriggerLeadTime: 6 * time.Hour}
+	fc := &fakeClient{
+		credits:     map[string]*Credit{"c1": {ID: "c1", Status: "available", ExpiresAt: E}},
+		weeklyPct:   50,
+		consumeResp: ConsumeResponse{Code: ConsumeCodeReset, WindowsReset: 1},
+	}
+	loader := func(string) (CodexCredentials, ResetClient, error) {
+		return CodexCredentials{AccessToken: "t"}, fc, nil
+	}
+	w := NewWorker(cfg, []string{"a"}, loader, time.Now)
+	w.testAccelerate = true
+	withTestClock(w, time.Now())
+
+	done := make(chan struct{})
+	go func() { w.Run(); close(done) }()
+
+	// Wait for the initial patrol to complete.
+	time.Sleep(50 * time.Millisecond)
+
+	// Manual reset: must complete the whole cycle within a short window
+	// (CONFIRMING -> RESETTING -> VERIFYING -> DONE), not at the next 12h patrol.
+	if err := w.ForceConfirm("a"); err != nil {
+		t.Fatalf("ForceConfirm: %v", err)
+	}
+
+	deadline := time.After(5 * time.Second)
+	for {
+		if fc.consumeCalls >= 1 {
+			w.Stop()
+			<-done
+			return
+		}
+		select {
+		case <-deadline:
+			w.Stop()
+			<-done
+			t.Fatalf("manual reset did not run within 5s (consumeCalls=%d)", fc.consumeCalls)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}

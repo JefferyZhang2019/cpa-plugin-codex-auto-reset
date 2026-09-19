@@ -39,6 +39,7 @@ type Worker struct {
 	fsms    map[string]*AccountFSM
 	logs    *logRing
 	stopCh  chan struct{}
+	wakeCh  chan struct{} // wakes the sleeping loop when a manual trigger changes nextWake
 	stopped bool
 
 	// testAccelerate, when true, makes Run advance the injected clock to the
@@ -53,7 +54,18 @@ func NewWorker(cfg Config, enabled []string, loader CredsLoader, nowFn func() ti
 	}
 	return &Worker{
 		cfg: cfg, enabled: enabled, loader: loader, nowFn: nowFn,
-		fsms: map[string]*AccountFSM{}, logs: newLogRing(maxLogEntries), stopCh: make(chan struct{}),
+		fsms: map[string]*AccountFSM{}, logs: newLogRing(maxLogEntries),
+		stopCh: make(chan struct{}), wakeCh: make(chan struct{}, 1),
+	}
+}
+
+// wake nudges the Run loop out of its current sleep so a manual trigger
+// (TriggerCheck/ForceConfirm) takes effect immediately instead of at the next
+// scheduled patrol. Non-blocking; the buffered channel coalesces multiple nudges.
+func (w *Worker) wake() {
+	select {
+	case w.wakeCh <- struct{}{}:
+	default:
 	}
 }
 
@@ -102,36 +114,47 @@ func (w *Worker) Stop() {
 }
 
 // TriggerCheck forces nextWake=now for one account (or all, if authID is
-// empty), so the worker loop picks it up on the next tick. In production the
-// loop may be sleeping until a later nextWake; the trigger lowers it to now
-// but the loop only notices when its current timer fires or the stop channel
-// fires. For immediate wakeup in production, callers should also send on an
-// external wake channel — but for the manual-check button the small latency
-// (up to the current sleep) is acceptable and tests use testAccelerate.
-func (w *Worker) TriggerCheck(authID string) {
+// empty) and wakes the sleeping loop, so the trigger takes effect
+// immediately. Returns an error when the account is not in the FSM map
+// (typically: not enabled in settings).
+func (w *Worker) TriggerCheck(authID string) error {
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	now := w.nowFn()
 	if authID == "" {
 		for _, fsm := range w.fsms {
 			fsm.SetNextWake(now)
 		}
-		return
+		w.mu.Unlock()
+		w.wake()
+		return nil
 	}
-	if fsm, ok := w.fsms[authID]; ok {
-		fsm.SetNextWake(now)
+	fsm, ok := w.fsms[authID]
+	if !ok {
+		w.mu.Unlock()
+		return fmt.Errorf("account %q not found (is it enabled?)", authID)
 	}
+	fsm.SetNextWake(now)
+	w.mu.Unlock()
+	w.wake()
+	return nil
 }
 
 // ForceConfirm advances an account's FSM directly to CONFIRMING (manual reset
-// button). Still runs the full confirm + idempotent consume + verify flow.
-func (w *Worker) ForceConfirm(authID string) {
+// button) and wakes the sleeping loop. Still runs the full confirm +
+// idempotent consume + verify flow. Returns an error when the account is
+// not in the FSM map (typically: not enabled in settings).
+func (w *Worker) ForceConfirm(authID string) error {
 	w.mu.Lock()
-	defer w.mu.Unlock()
-	if fsm, ok := w.fsms[authID]; ok {
-		fsm.ForceState(StateCONFIRMING)
-		fsm.SetNextWake(w.nowFn())
+	fsm, ok := w.fsms[authID]
+	if !ok {
+		w.mu.Unlock()
+		return fmt.Errorf("account %q not found (is it enabled?)", authID)
 	}
+	fsm.ForceState(StateCONFIRMING)
+	fsm.SetNextWake(w.nowFn())
+	w.mu.Unlock()
+	w.wake()
+	return nil
 }
 
 // Run blocks until Stop. Initializes FSMs, then loops: pick the soonest
@@ -303,6 +326,7 @@ func (w *Worker) sleepOrStop(d time.Duration) {
 	defer timer.Stop()
 	select {
 	case <-w.stopCh:
+	case <-w.wakeCh:
 	case <-timer.C:
 	}
 }

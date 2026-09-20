@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestPluginRegistration(t *testing.T) {
 	reg := pluginRegistration()
@@ -51,4 +54,68 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// TestBackfillResetHistory_NoDuplicateForSameReset verifies the backfill does
+// not append a second record when the SAME reset already exists in history
+// with a nanosecond-different timestamp (history from pendingHistory uses one
+// time.Now() reading; the log entry uses another).
+func TestBackfillResetHistory_NoDuplicateForSameReset(t *testing.T) {
+	authID := "acct-1"
+	ts1 := time.Date(2026, 9, 20, 1, 6, 22, 123456789, time.UTC)  // history record
+	ts2 := time.Date(2026, 9, 20, 1, 6, 22, 987654321, time.UTC)  // log entry (same second, different ns)
+	state := &PluginState{
+		ResetHistory: []ResetRecord{{
+			Timestamp: ts1, AuthID: authID, CreditID: "credit-A", Success: true,
+			PreWeeklyPct: 0, PostWeeklyPct: 100, PreCredits: 3, PostCredits: 2,
+		}},
+		Logs: []LogEntry{{
+			Timestamp: ts2, Level: "info", Scope: authID, State: StateDONE,
+			Message: "reset verified OK: credits 3→2, weekly 0%→100%, target credit-A consumed",
+			Details: map[string]any{
+				"credit_id": "credit-A", "pre_credits": 3.0, "post_credits": 2.0,
+				"pre_weekly_pct": 0.0, "post_weekly_pct": 100.0,
+			},
+		}},
+	}
+	backfillResetHistoryFromLogs(state)
+	if len(state.ResetHistory) != 1 {
+		t.Fatalf("expected 1 record after backfill, got %d (duplicate appended)", len(state.ResetHistory))
+	}
+}
+
+// TestBackfillResetHistory_CollapsesExistingDuplicates verifies records that
+// were duplicated by the old nanosecond-dedup bug get collapsed on load.
+func TestBackfillResetHistory_CollapsesExistingDuplicates(t *testing.T) {
+	base := time.Date(2026, 9, 20, 1, 6, 22, 0, time.UTC)
+	state := &PluginState{
+		ResetHistory: []ResetRecord{
+			{Timestamp: base.Add(100 * time.Nanosecond), AuthID: "a", CreditID: "c1", Success: true, PostWeeklyPct: 100},
+			{Timestamp: base.Add(900 * time.Nanosecond), AuthID: "a", CreditID: "c1", Success: true, PostWeeklyPct: 100},
+		},
+	}
+	backfillResetHistoryFromLogs(state)
+	if len(state.ResetHistory) != 1 {
+		t.Fatalf("expected duplicates collapsed to 1, got %d", len(state.ResetHistory))
+	}
+}
+
+// TestBackfillResetHistory_StillBackfillsOldLogs verifies genuine old resets
+// (history empty, logs present) are still backfilled exactly once.
+func TestBackfillResetHistory_StillBackfillsOldLogs(t *testing.T) {
+	ts := time.Date(2026, 7, 31, 22, 16, 35, 0, time.UTC)
+	state := &PluginState{
+		Logs: []LogEntry{{
+			Timestamp: ts, Level: "info", Scope: "old-acct", State: StateDONE,
+			Message: "reset verified OK: credits 2→1, weekly 91%→100%, target x consumed",
+			Details: map[string]any{
+				"credit_id": "x", "pre_credits": 2.0, "post_credits": 1.0,
+				"pre_weekly_pct": 91.0, "post_weekly_pct": 100.0,
+			},
+		}},
+	}
+	backfillResetHistoryFromLogs(state)
+	if len(state.ResetHistory) != 1 || !state.ResetHistory[0].Success {
+		t.Fatalf("expected 1 backfilled success, got %+v", state.ResetHistory)
+	}
 }

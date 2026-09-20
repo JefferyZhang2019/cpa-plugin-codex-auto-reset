@@ -602,14 +602,26 @@ func migrateLegacyState(newPath string) {
 // already in ResetHistory. This ensures past resets (from before the history
 // feature was added) are counted in statistics. Deduplicates by timestamp+authID.
 func backfillResetHistoryFromLogs(state *PluginState) {
+	// Collapse duplicates recorded by earlier versions (same authID + creditID
+	// + second), keeping the first occurrence. Runs even with no logs so stale
+	// duplicates in an upgraded state file are cleaned up.
+	collapseResetHistoryDuplicates(state)
+
 	if len(state.Logs) == 0 {
 		return
 	}
-	// Build a set of existing (timestamp, authID) pairs for dedup.
+	// Dedup key: authID + creditID + second-truncated timestamp. The history
+	// record (from pendingHistory) and the log entry for the SAME reset carry
+	// two separate time.Now() readings that differ by nanoseconds, so
+	// nanosecond-precision keys never match and every restart appended a
+	// duplicate. Second-granularity + creditID is exact enough: one credit is
+	// consumed at most once per second, and credit IDs are unique.
+	backfillKey := func(authID, creditID string, ts time.Time) string {
+		return authID + "|" + creditID + "|" + ts.Truncate(time.Second).Format(time.RFC3339)
+	}
 	existing := make(map[string]bool, len(state.ResetHistory))
 	for _, r := range state.ResetHistory {
-		key := r.AuthID + "|" + r.Timestamp.Format(time.RFC3339Nano)
-		existing[key] = true
+		existing[backfillKey(r.AuthID, r.CreditID, r.Timestamp)] = true
 	}
 
 	for _, e := range state.Logs {
@@ -633,7 +645,7 @@ func backfillResetHistoryFromLogs(state *PluginState) {
 			continue
 		}
 
-		key := e.Scope + "|" + e.Timestamp.Format(time.RFC3339Nano)
+		key := backfillKey(e.Scope, creditID, e.Timestamp)
 		if existing[key] {
 			continue
 		}
@@ -656,6 +668,24 @@ func backfillResetHistoryFromLogs(state *PluginState) {
 		})
 		existing[key] = true
 	}
+
+}
+
+// collapseResetHistoryDuplicates removes records sharing (authID, creditID,
+// second), keeping the first occurrence. Repairs state files polluted by the
+// pre-0.1.8 nanosecond-dedup bug in backfill.
+func collapseResetHistoryDuplicates(state *PluginState) {
+	seen := make(map[string]bool, len(state.ResetHistory))
+	deduped := state.ResetHistory[:0]
+	for _, r := range state.ResetHistory {
+		key := r.AuthID + "|" + r.CreditID + "|" + r.Timestamp.Truncate(time.Second).Format(time.RFC3339)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		deduped = append(deduped, r)
+	}
+	state.ResetHistory = deduped
 }
 
 // stateSyncPersistInterval bounds how often StateSync writes to disk. The

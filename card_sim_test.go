@@ -122,7 +122,7 @@ func TestCardSimulation_AllStates(t *testing.T) {
 	}
 	clock3 := &simClock{t: E.Add(-1 * time.Hour)}
 	fsm3 := NewAccountFSM("codex-ac9ce24f-carol@example.com-team.json", CodexCredentials{AccessToken: "tok"}, cfg, fc3, clock3.Now, logf)
-	fsm3.ForceState(StateCONFIRMING)
+	fsm3.ForceConfirm()
 	// Drive: CONFIRMING → RESETTING (POST, no_credit) → DONE → Reset → IDLE
 	for i := 0; i < 5 && fsm3.State() != StateIDLE; i++ {
 		stepAndPrintCard(t, fsm3, clock3, fc3, fmt.Sprintf("场景5 步骤%d", i+1))
@@ -161,7 +161,7 @@ func TestCardSimulation_AllStates(t *testing.T) {
 	fc5err := &errOnlyClient{credits: fc5.credits, weeklyPct: 40}
 	clock5 := &simClock{t: E.Add(-1 * time.Hour)}
 	fsm5 := NewAccountFSM("codex-fc4bac78-eve@example.com-team.json", CodexCredentials{AccessToken: "tok"}, cfg, fc5err, clock5.Now, logf)
-	fsm5.ForceState(StateCONFIRMING)
+	fsm5.ForceConfirm()
 	stepAndPrintCard(t, fsm5, clock5, fc5err, "场景7: 第一次 CONFIRMING→RESETTING")
 	// Drive retries
 	for i := 0; i < 10 && fsm5.State() != StateDONE; i++ {

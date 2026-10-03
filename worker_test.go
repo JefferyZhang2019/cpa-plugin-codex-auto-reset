@@ -238,51 +238,191 @@ func TestWorker_ForceConfirmNotFound(t *testing.T) {
 	}
 }
 
-// TestWorker_ManualResetImmediate verifies the manual reset (ForceConfirm) runs
-// the full cycle promptly thanks to the wake channel — no waiting for the
-// previously scheduled patrol.
 func TestWorker_ManualResetImmediate(t *testing.T) {
-	defer resetTestClock()
-	E := time.Now().Add(5 * 24 * time.Hour) // far-future expiry; nothing auto-triggers
+	start := time.Date(2026, 7, 19, 0, 0, 0, 0, time.UTC)
+	clock := newFakeWorkerClock(start)
 	cfg := Config{RefreshInterval: 12 * time.Hour, TriggerLeadTime: 6 * time.Hour}
 	fc := &fakeClient{
-		credits:     map[string]*Credit{"c1": {ID: "c1", Status: "available", ExpiresAt: E}},
+		credits:     map[string]*Credit{"c1": {ID: "c1", Status: "available", ExpiresAt: start.Add(5 * 24 * time.Hour)}},
 		weeklyPct:   50,
 		consumeResp: ConsumeResponse{Code: ConsumeCodeReset, WindowsReset: 1},
 	}
 	loader := func(string) (CodexCredentials, ResetClient, error) {
 		return CodexCredentials{AccessToken: "t"}, fc, nil
 	}
-	w := NewWorker(cfg, []string{"a"}, loader, time.Now)
-	w.testAccelerate = true
-	withTestClock(w, time.Now())
-
+	w := NewWorker(cfg, []string{"a"}, loader, clock.Now)
+	patrolled := make(chan int, 1)
+	w.StateSync = func(_ string, fsm *AccountFSM) {
+		if fsm.State() == StateIDLE {
+			patrolled <- fc.consumeCalls
+		}
+		if fsm.State() == StateVERIFYING {
+			w.Stop()
+		}
+	}
 	done := make(chan struct{})
 	go func() { w.Run(); close(done) }()
+	t.Cleanup(func() { w.Stop(); <-done })
 
-	// Wait for the initial patrol to complete.
-	time.Sleep(50 * time.Millisecond)
-
-	// Manual reset: must complete the whole cycle within a short window
-	// (CONFIRMING -> RESETTING -> VERIFYING -> DONE), not at the next 12h patrol.
+	select {
+	case calls := <-patrolled:
+		if calls != 0 {
+			t.Fatalf("consumed %d times before manual reset", calls)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("initial patrol did not complete")
+	}
 	if err := w.ForceConfirm("a"); err != nil {
 		t.Fatalf("ForceConfirm: %v", err)
 	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("manual reset did not wake the worker")
+	}
+	if fc.consumeCalls != 1 || fc.consumeIDs[0] != "c1" || !clock.Now().Equal(start) {
+		t.Fatalf("manual reset: consumed=%v clock=%v, want c1 immediately", fc.consumeIDs, clock.Now())
+	}
+	fsm := w.fsms["a"]
+	clock.AdvanceTo(fsm.NextWake())
+	w.stepAccountSafe("a")
+	if rec := fsm.TakePendingHistory(); rec == nil || !rec.Success || fsm.State() != StateIDLE {
+		t.Fatalf("manual verification: state=%s record=%+v", fsm.State(), rec)
+	}
+}
 
-	deadline := time.After(5 * time.Second)
-	for {
-		if fc.consumeCalls >= 1 {
-			w.Stop()
-			<-done
-			return
+func armedWorkerFixture(t *testing.T) (*Worker, *AccountFSM, *fakeClient, *fakeClock, time.Time) {
+	t.Helper()
+	fsm, fc, clock, trigger := armedFSMFixture(t)
+	w := NewWorker(fsm.Cfg, []string{"acct"}, func(string) (CodexCredentials, ResetClient, error) {
+		return CodexCredentials{}, fc, nil
+	}, clock.Now)
+	w.fsms["acct"] = fsm
+	return w, fsm, fc, clock, trigger
+}
+
+func TestWorker_ManagementCheckRespectsPinnedCycle(t *testing.T) {
+	for _, route := range []string{"check", "check/all"} {
+		t.Run(route, func(t *testing.T) {
+			w, fsm, fc, clock, trigger := armedWorkerFixture(t)
+			h := newManagementHandlers(&PluginState{Config: w.cfg}, "", w)
+			status, body, _ := h.handle("POST", "/v0/management/plugins/codex-auto-reset/"+route, nil, []byte(`{"auth_index":"acct"}`))
+			if status != 200 || !fsm.NextWake().Equal(clock.t) {
+				t.Fatalf("check: status=%d body=%s wake=%v", status, body, fsm.NextWake())
+			}
+			select {
+			case <-w.wakeCh:
+			default:
+				t.Fatal("check did not wake worker")
+			}
+			w.stepAccountSafe("acct")
+			w.stepAccountSafe("acct")
+			if fsm.State() != StateARMED || !fsm.NextWake().Equal(trigger) || fsm.attempt.RedeemRequestID != "" || fc.consumeCalls != 0 {
+				t.Fatalf("early check: state=%s wake=%v attempt=%+v", fsm.State(), fsm.NextWake(), fsm.attempt)
+			}
+			fc.credits["a"].Status = "redeemed"
+			clock.t = trigger
+			w.stepAccountSafe("acct")
+			w.stepAccountSafe("acct")
+			if fsm.State() == StateRESETTING {
+				w.stepAccountSafe("acct")
+			}
+			if fsm.State() != StateIDLE || fc.consumeCalls != 0 || !fsm.NextWake().Equal(trigger.Add(w.cfg.RefreshInterval)) {
+				t.Fatalf("abandoned cycle: state=%s consumed=%v wake=%v", fsm.State(), fc.consumeIDs, fsm.NextWake())
+			}
+		})
+	}
+}
+
+func TestWorker_ManagementManualResetFarFuture(t *testing.T) {
+	for _, initial := range []State{StateIDLE, StateARMED} {
+		for _, expiry := range []string{"far_future", "never"} {
+			t.Run(string(initial)+"/"+expiry, func(t *testing.T) {
+				w, fsm, fc, clock, _ := armedWorkerFixture(t)
+				if initial == StateIDLE {
+					fsm.Reset()
+				}
+				fc.credits["a"].Status = "redeemed"
+				if expiry == "never" {
+					fc.credits["b"].ExpiresAt = time.Time{}
+				}
+				h := newManagementHandlers(&PluginState{Config: w.cfg}, "", w)
+				status, body, _ := h.handle("POST", "/v0/management/plugins/codex-auto-reset/reset", nil, []byte(`{"auth_index":"acct"}`))
+				if status != 200 || fsm.State() != StateCONFIRMING || !fsm.NextWake().Equal(clock.t) {
+					t.Fatalf("manual reset: status=%d body=%s state=%s wake=%v", status, body, fsm.State(), fsm.NextWake())
+				}
+				if !fsm.manualReset || fsm.scheduledCreditID != "" {
+					t.Fatalf("manual intent=%v scheduled target=%q, want manual with obsolete target cleared", fsm.manualReset, fsm.scheduledCreditID)
+				}
+				select {
+				case <-w.wakeCh:
+				default:
+					t.Fatal("manual reset did not wake worker")
+				}
+				w.stepAccountSafe("acct")
+				w.stepAccountSafe("acct")
+				if fc.consumeCalls != 1 || fc.consumeIDs[0] != "b" || !fsm.attempt.StartedAt.Equal(clock.t) {
+					t.Fatalf("manual consume=%v attempt=%+v, want b now", fc.consumeIDs, fsm.attempt)
+				}
+				clock.t = fsm.NextWake()
+				w.stepAccountSafe("acct")
+				if rec := fsm.TakePendingHistory(); rec == nil || !rec.Success || fsm.State() != StateIDLE {
+					t.Fatalf("manual verification: state=%s record=%+v", fsm.State(), rec)
+				}
+			})
 		}
-		select {
-		case <-deadline:
-			w.Stop()
-			<-done
-			t.Fatalf("manual reset did not run within 5s (consumeCalls=%d)", fc.consumeCalls)
-		default:
-			time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestWorker_ResetClearsManualIntent(t *testing.T) {
+	w, fsm, fc, clock, trigger := armedWorkerFixture(t)
+	if err := w.ForceConfirm("acct"); err != nil {
+		t.Fatal(err)
+	}
+	fsm.Reset()
+	if !fsm.NextWake().IsZero() || fsm.attempt.RedeemRequestID != "" {
+		t.Fatalf("Reset retained schedule or attempt: wake=%v attempt=%+v", fsm.NextWake(), fsm.attempt)
+	}
+	w.stepAccountSafe("acct")
+	if fsm.State() != StateARMED {
+		t.Fatalf("new automatic cycle state=%s, want ARMED", fsm.State())
+	}
+	fc.credits["a"].Status = "redeemed"
+	clock.t = trigger
+	w.stepAccountSafe("acct")
+	w.stepAccountSafe("acct")
+	if fsm.State() != StateIDLE || fsm.attempt.RedeemRequestID != "" || fc.consumeCalls != 0 {
+		t.Fatalf("manual intent leaked into next cycle: state=%s attempt=%+v", fsm.State(), fsm.attempt)
+	}
+}
+
+func TestWorker_ManualResetPreservesActiveAttempt(t *testing.T) {
+	w, fsm, fc, clock, trigger := armedWorkerFixture(t)
+	fc.failFirstN = 1
+	fc.failErr = errString("temporary failure")
+	clock.t = trigger
+	w.stepAccountSafe("acct")
+	w.stepAccountSafe("acct")
+	w.stepAccountSafe("acct")
+	for _, state := range []State{StateRESETTING, StateVERIFYING} {
+		if fsm.State() != state {
+			t.Fatalf("state=%s, want %s", fsm.State(), state)
 		}
+		wake := fsm.NextWake()
+		rrid := fsm.attempt.RedeemRequestID
+		if err := w.ForceConfirm("acct"); err != nil {
+			t.Fatal(err)
+		}
+		if fsm.State() != state || !fsm.NextWake().Equal(wake) || fsm.attempt.RedeemRequestID != rrid {
+			t.Fatalf("manual reset interrupted %s: state=%s wake=%v attempt=%+v", state, fsm.State(), fsm.NextWake(), fsm.attempt)
+		}
+		clock.t = wake
+		w.stepAccountSafe("acct")
+	}
+	if fc.consumeCalls != 2 || fc.redeemIDs[0] != fc.redeemIDs[1] || fc.consumeIDs[0] != "a" || fc.consumeIDs[1] != "a" {
+		t.Fatalf("retry changed: targets=%v redeemIDs=%v", fc.consumeIDs, fc.redeemIDs)
+	}
+	if rec := fsm.TakePendingHistory(); rec == nil || !rec.Success {
+		t.Fatalf("verification record=%+v", rec)
 	}
 }

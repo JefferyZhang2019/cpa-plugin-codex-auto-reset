@@ -26,7 +26,7 @@ type LogFn func(level, scope string, state State, msg, nextAction string, nextAt
 //
 // Concurrency: the worker goroutine drives Step(). External readers (worker's
 // EachFSM, management handlers) may call State()/NextWake()/SetNextWake()/
-// ForceState() from other goroutines; all field access is guarded by mu.
+// ForceConfirm() from other goroutines; all field access is guarded by mu.
 type AccountFSM struct {
 	AuthID string
 	Creds  CodexCredentials
@@ -35,11 +35,13 @@ type AccountFSM struct {
 	Now    func() time.Time
 	Logf   LogFn
 
-	mu        sync.Mutex
-	state     State
-	attempt   ResetAttempt
-	nextWake  time.Time
-	verifyDue time.Time
+	mu                sync.Mutex
+	state             State
+	attempt           ResetAttempt
+	nextWake          time.Time
+	verifyDue         time.Time
+	scheduledCreditID string
+	manualReset       bool
 	// pendingHistory is set in stepVERIFYING with the reset result. NOT cleared
 	// by Reset() so the worker can collect it after the cycle ends. The worker
 	// sets it back to nil after collecting.
@@ -89,18 +91,23 @@ func (f *AccountFSM) SetNextWake(t time.Time) {
 	f.nextWake = t
 }
 
-// ForceState transitions the FSM to a target state (used by the worker's
-// manual-reset ForceConfirm path). Thread-safe.
-func (f *AccountFSM) ForceState(s State) {
+// ForceConfirm requests a manual reset without interrupting consume or verify.
+// Thread-safe; manual intent and its immediate wake are set together.
+func (f *AccountFSM) ForceConfirm() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.state = s
+	if f.state == StateRESETTING || f.state == StateVERIFYING {
+		return
+	}
+	f.scheduledCreditID = ""
+	f.manualReset = true
+	f.state = StateCONFIRMING
+	f.nextWake = f.now()
 }
 
 // Step executes one FSM tick at f.Now() and returns the next scheduled wake.
-// Returns zero time when the cycle terminated (DONE). The behavior mirrors
-// sim/engine.go's step() one-to-one; that simulation validated the design
-// across 231 tests covering all (R, L) relations and edge cases.
+// Returns zero time when the cycle terminated (DONE). The automatic flow
+// mirrors sim/engine.go's step(), covering (R, L) relations and edge cases.
 //
 // Step takes the FSM mutex for the whole tick; HTTP calls happen under lock,
 // which is fine because the FSM is driven by a single worker goroutine (no
@@ -168,6 +175,12 @@ func (f *AccountFSM) stepIDLE() time.Time {
 		return next
 	}
 	target := avail[0]
+	if target.ExpiresAt.IsZero() {
+		next := now.Add(f.Cfg.RefreshInterval)
+		f.nextWake = next
+		f.log("info", "no expiring credits to schedule", "patrol", &next, nil)
+		return next
+	}
 	M := f.armThreshold(target)
 	if now.Before(M) {
 		next := now.Add(f.Cfg.RefreshInterval)
@@ -181,6 +194,7 @@ func (f *AccountFSM) stepIDLE() time.Time {
 	// now >= M -> ARMED. Sleep to T (or now if T already passed: late-start,
 	// spec §4.2.1). ARMED does NO extra GETs; it just transitions on wake.
 	T := f.triggerTime(target)
+	f.scheduledCreditID = target.ID
 	f.state = StateARMED
 	wake := T
 	if !now.Before(T) {
@@ -195,10 +209,10 @@ func (f *AccountFSM) stepIDLE() time.Time {
 }
 
 func (f *AccountFSM) stepARMED() time.Time {
-	// ARMED only sleeps to T; the wake has happened. Proceed to CONFIRMING.
+	// A Check may wake ARMED early; CONFIRMING revalidates the trigger time.
 	// Zero extra GETs in this state (revised design).
 	f.state = StateCONFIRMING
-	f.log("info", "trigger time reached, confirming before reset", "send reset request", nil, nil)
+	f.log("info", "armed wake, confirming target and trigger time", "confirm before reset", nil, nil)
 	return f.now() // re-enter immediately
 }
 
@@ -211,10 +225,38 @@ func (f *AccountFSM) stepCONFIRMING() time.Time {
 		return time.Time{}
 	}
 	avail := availableCreditsSorted(snap.Credits, now)
-	if len(avail) == 0 {
+	var target Credit
+	if f.manualReset {
+		if len(avail) > 0 {
+			target = avail[0]
+		}
+	} else if f.scheduledCreditID != "" {
+		for _, credit := range avail {
+			if credit.ID == f.scheduledCreditID {
+				target = credit
+				break
+			}
+		}
+	}
+	if target.ID == "" {
 		f.state = StateDONE
-		f.log("warn", "target credit vanished before reset", "abandon", nil, nil)
+		f.log("warn", "target credit missing or unavailable before reset", "abandon", nil, nil)
 		return time.Time{}
+	}
+	if !f.manualReset {
+		if target.ExpiresAt.IsZero() {
+			f.state = StateDONE
+			f.log("info", "target credit no longer expires", "abandon", nil, nil)
+			return time.Time{}
+		}
+		T := f.triggerTime(target)
+		if now.Before(T) {
+			f.state = StateARMED
+			f.nextWake = T
+			f.log("info", "target credit not yet due; re-armed", "sleep to trigger time", &T,
+				map[string]any{"credit_id": target.ID, "T": T})
+			return T
+		}
 	}
 	// Fetch usage separately so PreSnapshot.WeeklyPct carries a real value.
 	// The reset-credits endpoint does NOT return weekly % (parseResetCreditsResponse
@@ -228,7 +270,6 @@ func (f *AccountFSM) stepCONFIRMING() time.Time {
 		return time.Time{}
 	}
 	snap.WeeklyPct = usage.WeeklyPct
-	target := avail[0]
 	f.attempt = ResetAttempt{
 		RedeemRequestID: uuid.NewString(),
 		TargetCreditID:  target.ID,
@@ -392,6 +433,8 @@ func (f *AccountFSM) Reset() {
 	f.attempt = ResetAttempt{}
 	f.verifyDue = time.Time{}
 	f.nextWake = time.Time{}
+	f.scheduledCreditID = ""
+	f.manualReset = false
 }
 
 // TakePendingHistory returns the reset result captured in stepVERIFYING and

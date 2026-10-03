@@ -92,26 +92,19 @@ func TestCreditVanishesDuringARMED(t *testing.T) {
 
 	client := newClient("c1", E, 30)
 
-	// Start just after M so we enter ARMED immediately and sleep to T.
-	start := T.Add(-30 * time.Minute) // 11:53:47, inside ARMED window
-	// Schedule the credit to vanish before T via a list-side hook: when list
-	// is called at or after T, mark credit redeemed (human used it).
-	originalList := client.list
-	_ = originalList
-	// We can't override methods; use a wrapper by replacing the Credits map at T.
-	// Instead, simulate by setting status=redeemed at start; the engine's local
-	// filter still returns it (status != "available" -> pickTarget returns false).
+	start := T.Add(-30 * time.Minute)
+	fsm := newFSM(cfg, client, start, "")
+	wake := fsm.step()
+	if fsm.state != StateARMED || !wake.Equal(T) {
+		t.Fatalf("state=%s wake=%v, want ARMED at T", fsm.state, wake)
+	}
 	client.Credits["c1"].Status = "redeemed"
-
-	out := Run(cfg, client, start, 14*24*time.Hour)
-
-	if out.NumConsumePOST != 0 {
-		t.Fatalf("expected 0 POSTs when credit vanished, got %d", out.NumConsumePOST)
+	fsm.now = wake
+	fsm.step()
+	fsm.step()
+	if fsm.state != StateDONE || !fsm.out.GaveUp || client.ConsumedCalls != 0 {
+		t.Fatalf("vanished target: state=%s consumed=%v gaveUp=%v", fsm.state, client.ConsumedIDs, fsm.out.GaveUp)
 	}
-	if !out.GaveUp {
-		t.Fatalf("expected gaveUp when credit vanished during ARMED")
-	}
-	t.Logf("OK credit vanished during ARMED; no POST, gaveUp=%q", out.GiveUpReason)
 }
 
 // TestWrongCreditConsumed_DetectsMismatch: server consumes a DIFFERENT credit
@@ -207,6 +200,135 @@ func TestLongPatrolRhythm(t *testing.T) {
 		t.Fatalf("reset drifted %v from T %s", drift, T)
 	}
 	t.Logf("OK long patrol: %d list calls, reset at T=%s", out.NumListCalls, out.ResetAt.Format("01-02 15:04:05"))
+}
+
+func armedFixture(t *testing.T) (*accountFSM, *FakeOpenAIClient, time.Time) {
+	t.Helper()
+	E := time.Date(2026, 7, 19, 18, 23, 47, 0, time.UTC)
+	cfg := DefaultConfig()
+	client := newClient("a", E, 25)
+	client.Credits["b"] = &Credit{ID: "b", Status: "available", ExpiresAt: E.Add(14 * 24 * time.Hour)}
+	fsm := newFSM(cfg, client, E.Add(-12*time.Hour), "")
+	wake := fsm.step()
+	if fsm.state != StateARMED || !wake.Equal(E.Add(-cfg.TriggerLeadTime)) {
+		t.Fatalf("state=%s wake=%v, want ARMED at T", fsm.state, wake)
+	}
+	return fsm, client, wake
+}
+
+func TestPinnedTargetUnavailable(t *testing.T) {
+	for _, change := range []string{"redeemed", "removed", "expired", "expires_now"} {
+		for _, replacement := range []string{"far_future", "already_due"} {
+			t.Run(change+"/"+replacement, func(t *testing.T) {
+				fsm, client, trigger := armedFixture(t)
+				fsm.now = trigger
+				switch change {
+				case "redeemed":
+					client.Credits["a"].Status = "redeemed"
+				case "removed":
+					delete(client.Credits, "a")
+				case "expired":
+					client.Credits["a"].ExpiresAt = trigger.Add(-time.Second)
+				case "expires_now":
+					client.Credits["a"].ExpiresAt = trigger
+				}
+				if replacement == "already_due" {
+					client.Credits["b"].ExpiresAt = trigger.Add(time.Hour)
+				}
+				fsm.step()
+				fsm.step()
+				if fsm.state == StateRESETTING {
+					fsm.step()
+				}
+				if fsm.state != StateDONE || !fsm.out.GaveUp || client.ConsumedCalls != 0 || fsm.redeemID != "" {
+					t.Fatalf("state=%s consumed=%v redeemID=%s; want abandon pinned cycle", fsm.state, client.ConsumedIDs, fsm.redeemID)
+				}
+			})
+		}
+	}
+}
+
+func TestAutomaticConfirmRequiresTarget(t *testing.T) {
+	for _, state := range []State{StateARMED, StateCONFIRMING} {
+		t.Run(string(state), func(t *testing.T) {
+			E := time.Date(2026, 7, 19, 18, 23, 47, 0, time.UTC)
+			client := newClient("a", E, 25)
+			fsm := newFSM(DefaultConfig(), client, E.Add(-time.Hour), "")
+			fsm.state = state
+			if state == StateARMED {
+				fsm.step()
+			}
+			fsm.step()
+			if fsm.state != StateDONE || fsm.redeemID != "" || client.ConsumedCalls != 0 {
+				t.Fatalf("missing target: state=%s redeemID=%s", fsm.state, fsm.redeemID)
+			}
+		})
+	}
+}
+
+func TestPinnedTargetSurvivesEarlierCredit(t *testing.T) {
+	fsm, client, trigger := armedFixture(t)
+	fsm.now = trigger
+	client.Credits["new"] = &Credit{ID: "new", Status: "available", ExpiresAt: trigger.Add(time.Hour)}
+	fsm.step()
+	fsm.step()
+	fsm.step()
+	if client.ConsumedCalls != 1 || client.ConsumedIDs[0] != "a" {
+		t.Fatalf("consumed=%v, want original armed target a", client.ConsumedIDs)
+	}
+}
+
+func TestConfirmRevalidatesTrigger(t *testing.T) {
+	for _, change := range []string{"early_wake", "expiry_extended"} {
+		t.Run(change, func(t *testing.T) {
+			fsm, client, trigger := armedFixture(t)
+			want := trigger
+			if change == "expiry_extended" {
+				fsm.now = trigger
+				client.Credits["a"].ExpiresAt = client.Credits["a"].ExpiresAt.Add(24 * time.Hour)
+				want = trigger.Add(24 * time.Hour)
+			}
+			fsm.step()
+			wake := fsm.step()
+			if fsm.state != StateARMED || !wake.Equal(want) || fsm.redeemID != "" || client.ConsumedCalls != 0 {
+				t.Fatalf("state=%s wake=%v redeemID=%s, want re-arm at %v", fsm.state, wake, fsm.redeemID, want)
+			}
+			client.Credits["new"] = &Credit{ID: "new", Status: "available", ExpiresAt: want.Add(time.Hour)}
+			fsm.now = wake
+			fsm.step()
+			fsm.step()
+			fsm.step()
+			if client.ConsumedCalls != 1 || client.ConsumedIDs[0] != "a" || !fsm.out.ResetAt.Equal(want) {
+				t.Fatalf("consumed=%v resetAt=%v, want a at %v", client.ConsumedIDs, fsm.out.ResetAt, want)
+			}
+		})
+	}
+}
+
+func TestNeverExpiringAutomaticCredit(t *testing.T) {
+	t.Run("idle", func(t *testing.T) {
+		now := time.Date(2026, 7, 19, 0, 0, 0, 0, time.UTC)
+		client := newClient("never", time.Time{}, 25)
+		fsm := newFSM(DefaultConfig(), client, now, "")
+		snap := client.list(now)
+		if snap.AvailableCount != 1 {
+			t.Fatalf("never-expiring credit was filtered out: %+v", snap)
+		}
+		wake := fsm.step()
+		if fsm.state != StateIDLE || !wake.Equal(now.Add(fsm.cfg.RefreshInterval)) || client.ConsumedCalls != 0 {
+			t.Fatalf("state=%s wake=%v, want patrol without automatic redemption", fsm.state, wake)
+		}
+	})
+	t.Run("expiry_removed_while_armed", func(t *testing.T) {
+		fsm, client, trigger := armedFixture(t)
+		client.Credits["a"].ExpiresAt = time.Time{}
+		fsm.now = trigger
+		fsm.step()
+		fsm.step()
+		if fsm.state != StateDONE || fsm.redeemID != "" || client.ConsumedCalls != 0 {
+			t.Fatalf("state=%s redeemID=%s, want abandon non-expiring target", fsm.state, fsm.redeemID)
+		}
+	})
 }
 
 func contains(s, sub string) bool {

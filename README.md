@@ -4,10 +4,6 @@
 automatically redeems the soonest-expiring Codex "Reset Bank" credit on each
 enabled account before it expires, so no credit is ever lost to forgetfulness.
 
-**Version lines:** plugin v2.x is built against the `CLIProxyAPI/v8` plugin
-SDK (CPA 8.x). Plugin v1.x (up to and including 0.1.10) is frozen and was
-built against `CLIProxyAPI/v7` (CPA 7.3+).
-
 Codex/ChatGPT accounts accumulate rate-limit reset credits that a user can
 manually redeem to reset their weekly rate-limit window. These credits expire,
 and the expiry window is easy to miss. This plugin watches each enabled

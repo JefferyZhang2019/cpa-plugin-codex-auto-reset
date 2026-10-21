@@ -139,10 +139,10 @@ func (w *Worker) TriggerCheck(authID string) error {
 	return nil
 }
 
-// ForceConfirm advances an account's FSM directly to CONFIRMING (manual reset
-// button) and wakes the sleeping loop. Still runs the full confirm +
-// idempotent consume + verify flow. Returns an error when the account is
-// not in the FSM map (typically: not enabled in settings).
+// ForceConfirm requests manual confirmation and wakes the sleeping loop.
+// Active consume/retry and verify steps are left intact. Otherwise it runs
+// the full confirm + idempotent consume + verify flow. Returns an error when
+// the account is not in the FSM map (typically: not enabled in settings).
 func (w *Worker) ForceConfirm(authID string) error {
 	w.mu.Lock()
 	fsm, ok := w.fsms[authID]
@@ -150,8 +150,7 @@ func (w *Worker) ForceConfirm(authID string) error {
 		w.mu.Unlock()
 		return fmt.Errorf("account %q not found (is it enabled?)", authID)
 	}
-	fsm.ForceState(StateCONFIRMING)
-	fsm.SetNextWake(w.nowFn())
+	fsm.ForceConfirm()
 	w.mu.Unlock()
 	w.wake()
 	return nil

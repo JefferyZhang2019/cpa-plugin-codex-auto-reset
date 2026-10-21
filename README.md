@@ -20,12 +20,13 @@ plus the standard plugin lifecycle and Management API surface.
 For each enabled Codex account, the plugin runs a 6-state state machine:
 
 ```
-IDLE       → patrol every refresh_interval; if a credit's trigger window
-             is within one interval, enter ARMED
+IDLE       → patrol every refresh_interval; if the soonest-expiring credit's
+             trigger window is within one interval, pin its ID and enter ARMED
 ARMED      → sleep directly to the trigger time T = expiry − trigger_lead_time
              (no polling); on wake, enter CONFIRMING
-CONFIRMING → re-list credits + fetch usage; pick the soonest-expiring
-             available credit; mint a redeem_request_id; enter RESETTING
+CONFIRMING → re-list credits; validate the pinned target is still available,
+             unexpired, and due; if early, re-arm the same ID at its fresh T;
+             otherwise fetch usage, mint a redeem_request_id, enter RESETTING
 RESETTING  → POST /consume with {redeem_request_id, credit_id}; on success
              enter VERIFYING; on transient error retry (same idempotency key,
              1/2/5/10/30 min backoff, max 5); on 4xx or no_credit stop
@@ -34,15 +35,29 @@ VERIFYING  → after 1 min, re-list + fetch usage; triple deduction check
 DONE       → cycle complete; back to IDLE
 ```
 
-**Safety invariants** (verified by a 231-test simulation in `sim/`):
+An automatic cycle never substitutes another credit if its pinned target
+is redeemed, removed, or expired, even if another credit is already due. A
+missing target ID also abandons the cycle. Credits with no expiry are never
+automatically redeemed; if the pinned target becomes non-expiring, that cycle
+is abandoned. The next IDLE patrol can schedule a new cycle normally.
+
+**Check** (including Check All) only wakes the worker; it does not authorize
+an early reset. Confirmation rechecks the target's current expiry and waits
+until its updated trigger time. **Reset** explicitly requests immediate manual
+confirmation, clears the old automatic target, and selects the currently
+soonest-expiring available credit, even far before its trigger time (or with
+no expiry). It still runs the full confirm, consume, and verify flow. Repeated
+Reset requests during consume/retry or verification leave that active attempt
+intact. Returning to IDLE clears both the pinned target and manual intent.
+
+**Safety invariants** (covered by production tests and the simulation in `sim/`):
 
 1. **Serial per account.** Only one POST /consume is ever in flight per
-   account per cycle. All retries reuse the same `redeem_request_id`, so
-   OpenAI dedupes — it is physically impossible to consume two credits in
-   one cycle.
-2. **Always targeted.** The consume body always carries `credit_id` pointing
-   at the soonest-expiring available credit. OpenAI cannot auto-pick a later
-   credit.
+   account per cycle. All retries reuse the same target and
+   `redeem_request_id`, allowing OpenAI to deduplicate them.
+2. **Always targeted.** The consume body always carries `credit_id`. Automatic
+   confirmation validates the ID pinned when arming, not a newly selected
+   credit. Manual Reset explicitly selects a fresh available target.
 3. **Triple deduction check.** Verification requires (a) the target credit is
    gone, (b) `available_count` decreased by exactly 1, AND (c) weekly quota
    recovered. Any mismatch halts immediately — no compensating request is sent.
@@ -230,8 +245,11 @@ Before relying on this plugin in production, verify against real OpenAI:
 - [ ] Reusing the same `redeem_request_id` returns `code=already_redeemed`
       (idempotent success).
 - [ ] After a successful reset, the weekly quota recovers to 100%.
-- [ ] Deferral: after a manual Check, the next automatic check is
-      `refresh_interval` from the manual check's completion time.
+- [ ] Deferral: after a manual Check in IDLE with no imminent credit, the next
+      patrol is `refresh_interval` from the manual check's completion time.
+- [ ] Check while ARMED does not consume before the pinned target's trigger time.
+- [ ] Redeeming the pinned target externally while ARMED abandons that cycle
+      without consuming a different credit.
 
 Real-credit verification is necessarily infrequent (credits are scarce and
 expire over weeks). The `sim/` directory contains a deterministic event-driven

@@ -76,12 +76,18 @@ func (c *FakeOpenAIClient) list(now time.Time) Snapshot {
 	credits := make([]Credit, 0, len(c.Credits))
 	for _, cr := range c.Credits {
 		// Local defensive filter (§2.3 step 1 in spec): exclude expired.
-		if cr.ExpiresAt.Before(now) || cr.ExpiresAt.Equal(now) {
+		if !cr.ExpiresAt.IsZero() && !cr.ExpiresAt.After(now) {
 			continue
 		}
 		credits = append(credits, *cr)
 	}
 	sort.Slice(credits, func(i, j int) bool {
+		if credits[i].ExpiresAt.IsZero() {
+			return false
+		}
+		if credits[j].ExpiresAt.IsZero() {
+			return true
+		}
 		return credits[i].ExpiresAt.Before(credits[j].ExpiresAt)
 	})
 	avail := 0
@@ -244,6 +250,11 @@ func (f *accountFSM) stepIDLE() time.Time {
 		f.recordState(&next, "no available credit")
 		return next
 	}
+	if target.ExpiresAt.IsZero() {
+		next := f.now.Add(f.cfg.RefreshInterval)
+		f.recordState(&next, "no expiring credit to schedule")
+		return next
+	}
 
 	M := f.armThreshold(target)
 	T := f.triggerTime(target)
@@ -254,6 +265,7 @@ func (f *accountFSM) stepIDLE() time.Time {
 		return next
 	}
 	// now >= M -> ARMED. Wake at T (or immediately if now >= T).
+	f.targetID = target.ID
 	f.state = StateARMED
 	wake := T
 	if !f.now.Before(T) {
@@ -264,7 +276,7 @@ func (f *accountFSM) stepIDLE() time.Time {
 }
 
 func (f *accountFSM) stepARMED() time.Time {
-	// ARMED just sleeps to T; the wake has already happened. Proceed to CONFIRMING.
+	// A Check may wake ARMED early; CONFIRMING revalidates the trigger time.
 	f.state = StateCONFIRMING
 	f.recordState(nil, "armed wake -> confirming")
 	return f.now
@@ -275,15 +287,28 @@ func (f *accountFSM) stepCONFIRMING() time.Time {
 	f.out.NumListCalls = f.client.ListCalls
 	f.out.Events = append(f.out.Events, Event{Time: f.now, Type: EvHTTPList, State: f.state, Detail: fmt.Sprintf("confirm available=%d", snap.AvailableCount)})
 
-	target, ok := f.pickTarget(snap)
-	if !ok {
+	var target Credit
+	if f.targetID != "" {
+		for _, credit := range snap.Credits {
+			if credit.ID == f.targetID && credit.Status == "available" {
+				target = credit
+				break
+			}
+		}
+	}
+	if target.ID == "" || target.ExpiresAt.IsZero() {
 		f.state = StateDONE
 		f.out.GaveUp = true
-		f.out.GiveUpReason = "credit disappeared before reset"
-		f.recordState(nil, "confirm: target gone, abandon")
+		f.out.GiveUpReason = "target credit missing, unavailable, or no longer expiring"
+		f.recordState(nil, "confirm: invalid target, abandon")
 		return time.Time{}
 	}
-	f.targetID = target.ID
+	T := f.triggerTime(target)
+	if f.now.Before(T) {
+		f.state = StateARMED
+		f.recordState(&T, "target not yet due; re-armed")
+		return T
+	}
 	f.preSnap = snap
 	f.redeemID = fmt.Sprintf("rrid-%d-%s", f.out.NumConsumePOST+1, target.ID)
 	f.attempt = 0

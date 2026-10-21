@@ -89,7 +89,7 @@ func TestManagement_PutSettingsUpdatesAndPersists(t *testing.T) {
 		t.Fatalf("enabled = %v", resp.EnabledAccounts)
 	}
 	// State file should now exist (persisted).
-	loaded, err := loadState(srv.h.statePath)
+	loaded, _, err := loadState(srv.h.statePath)
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestManagement_ImportExportRoundTrip(t *testing.T) {
 	// Re-import the exported state.
 	srv.post(t, "/v0/management/plugins/codex-auto-reset/import", exported)
 	// State should be unchanged (round-trip).
-	loaded, _ := loadState(srv.h.statePath)
+	loaded, _, _ := loadState(srv.h.statePath)
 	if loaded.Config.RefreshInterval != DefaultConfig().RefreshInterval {
 		t.Fatalf("import changed config: R = %v", loaded.Config.RefreshInterval)
 	}

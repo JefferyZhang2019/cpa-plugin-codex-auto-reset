@@ -10,13 +10,16 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config holds the 3 user-tunable fields (spec §7.1). All other behavior is
-// hardcoded in constants.go — endpoints, retry delays, post-reset delay,
-// log limits. Endpoints and OpenAI parameters are NEVER user-configurable.
+// Config holds the user-tunable fields. The 3 scheduling fields are editable
+// from the management UI; state_dir is an operator-only override that comes
+// from CPA's config_yaml. All other behavior is hardcoded in constants.go —
+// endpoints, retry delays, post-reset delay, log limits. Endpoints and OpenAI
+// parameters are NEVER user-configurable.
 type Config struct {
 	RefreshInterval time.Duration `yaml:"refresh_interval" json:"-"`
 	TriggerLeadTime time.Duration `yaml:"trigger_lead_time" json:"-"`
 	EnabledAccounts []string      `yaml:"enabled_accounts" json:"enabled_accounts"`
+	StateDir        string        `yaml:"state_dir" json:"state_dir,omitempty"`
 }
 
 // MarshalJSON renders Duration fields as human-readable strings ("12h",
@@ -27,6 +30,7 @@ func (c Config) MarshalJSON() ([]byte, error) {
 		RefreshInterval string   `json:"refresh_interval"`
 		TriggerLeadTime string   `json:"trigger_lead_time"`
 		EnabledAccounts []string `json:"enabled_accounts"`
+		StateDir        string   `json:"state_dir,omitempty"`
 	}
 	return json.Marshal(alias{
 		RefreshInterval: formatDuration(c.RefreshInterval),
@@ -56,12 +60,14 @@ func (c *Config) UnmarshalJSON(raw []byte) error {
 		RefreshInterval json.RawMessage `json:"refresh_interval"`
 		TriggerLeadTime json.RawMessage `json:"trigger_lead_time"`
 		EnabledAccounts []string        `json:"enabled_accounts"`
+		StateDir        string          `json:"state_dir"`
 	}
 	var a alias
 	if err := json.Unmarshal(raw, &a); err != nil {
 		return err
 	}
 	c.EnabledAccounts = a.EnabledAccounts
+	c.StateDir = a.StateDir
 	d1, err := parseDurationJSON(a.RefreshInterval)
 	if err != nil {
 		return fmt.Errorf("refresh_interval: %w", err)

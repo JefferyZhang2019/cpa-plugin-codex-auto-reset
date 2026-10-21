@@ -87,10 +87,32 @@ These requests use the Codex credentials already configured in CPA. The plugin
 uses the responses to calculate reset-credit expiry, target the soonest-expiring
 credit, and verify the reset took effect.
 
-The plugin stores local state in CPA's plugin state area
-(`codex-auto-reset.state.json`). Stored data includes the 3 user config fields,
-per-account FSM state (current state, next wake time), and recent log entries.
-No access tokens or credential material are persisted in the state file.
+### State Storage And Durability
+
+The plugin persists its state file (`state.json`) — the user config fields,
+per-account FSM state, reset history, and recent log entries — at the first
+available location below (resolved once at startup, with one-time forward
+migration from older locations; superseded files are kept as `.migrated`):
+
+1. `state_dir` from the plugin's `config_yaml` block (operator override,
+   must be an absolute path)
+2. `<CPA auth dir>/plugin-state/codex-auto-reset/state.json` — derived from
+   the auth file paths reported by the host. **Recommended and default**: in
+   container deployments the auth dir is the tree operators volume-mount, so
+   state survives CPA image updates and container recreates.
+3. `<OS user config dir>/CLIProxyAPI/codex-auto-reset/state.json` — fallback
+   (Windows `%APPDATA%`, Linux `~/.config`). **Ephemeral inside containers**
+   unless that path is volume-mounted.
+
+The plugin also keeps a one-generation backup (`state.json.bak`, refreshed on
+every successful load) and, if the main file is ever corrupt, quarantines the
+original bytes as `state.json.corrupt-<timestamp>` before recovering from the
+backup — state is never silently destroyed.
+
+Docker note: with the default auth-dir location, mounting your auth dir (you
+already must, for credentials) is enough, e.g.
+`-v ./cpa/auths:/root/.cli-proxy-api`. No access tokens or credential
+material are persisted in the state file.
 
 ## Installation
 
@@ -135,6 +157,8 @@ trigger_lead_time: 6h        # redeem this long before a credit expires (default
 enabled_accounts:            # subset of Codex account auth_indexes (default: none)
   - auth_index_1
   - auth_index_2
+state_dir: /absolute/path    # optional operator override for the state file
+                             # location (see State Storage And Durability)
 ```
 
 All other behavior (OpenAI endpoints, retry backoff, post-reset verify delay,

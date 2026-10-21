@@ -72,7 +72,12 @@ var (
 	globalState   = &PluginState{Accounts: map[string]AccountRuntime{}}
 	globalWorker  *Worker
 	globalHandlers *managementHandlers
-	pluginVersion = "0.1.11"
+	// globalStatePath is the state file resolved once per boot in
+	// configurePlugin (explicit state_dir > CPA auth dir > OS user-config
+	// dir). All saves go through it so reconfigure cannot split state
+	// across locations.
+	globalStatePath string
+	pluginVersion   = "0.1.12"
 )
 
 func main() {}
@@ -276,20 +281,23 @@ func configurePlugin(raw []byte) error {
 	pluginStateMu.Lock()
 	defer pluginStateMu.Unlock()
 
-	// Load persisted state if present; otherwise seed with config-derived defaults.
-	statePath := defaultStatePath()
-	// Announce where state lives so operators know what to back up / volume-mount.
-	// Especially important for container deployments: without a volume over this
-	// path, statistics and logs are lost on every container rebuild.
-	if globalWorker != nil {
-		globalWorker.Logs().append(LogEntry{
-			Timestamp: time.Now(), Level: "info", Scope: "system",
-			Message: "state file location: " + statePath,
-		})
-	}
-	migrateLegacyState(statePath)
-	loaded, err := loadState(statePath)
+	// Resolve the state location ONCE per boot, most-durable first (see
+	// resolveStatePath). Container deployments volume-mount CPA's auth dir
+	// but rarely the OS user-config dir, so keying state off the auth dir is
+	// what makes it survive image updates and container recreates.
+	yamlStateDir := strings.TrimSpace(cfg.StateDir)
+	authEntries, authListErr := listAuthsViaHost()
+	statePath := resolveStatePath(yamlStateDir, authEntries)
+	globalStatePath = statePath
+	// Forward migrations from superseded locations. Each runs at most once;
+	// sources are kept as .migrated, never destroyed.
+	migrateLegacyState(statePath)                   // pre-0.1.7 CWD-relative file
+	migrateStateFile(defaultStatePath(), statePath) // 0.1.7+ OS user-config dir
+	loaded, source, err := loadState(statePath)
 	if err != nil {
+		// Start empty but treat persistence as suspect: log loudly so the
+		// operator can inspect the file before the next save replaces it.
+		source = "error: " + err.Error()
 		loaded = &PluginState{Accounts: map[string]AccountRuntime{}}
 	}
 	if loaded.Config.RefreshInterval == 0 && loaded.Config.TriggerLeadTime == 0 && len(loaded.Config.EnabledAccounts) == 0 {
@@ -297,6 +305,11 @@ func configurePlugin(raw []byte) error {
 		loaded.Config = cfg
 	} else {
 		cfg = loaded.Config
+	}
+	// The config_yaml override is authoritative for state_dir across
+	// state.json round-trips (a fresh save persists it for later boots).
+	if yamlStateDir != "" {
+		cfg.StateDir = yamlStateDir
 	}
 	globalState = loaded
 	globalState.Config = cfg
@@ -307,6 +320,24 @@ func configurePlugin(raw []byte) error {
 	}
 	enabled := cfg.EnabledAccounts
 	globalWorker = NewWorker(cfg, enabled, hostCredsLoader, time.Now)
+	// Always announce the state location and load source — on FIRST load too,
+	// not just reconfigure — so operators know what to back up / volume-mount.
+	loadLevel := "info"
+	if strings.HasPrefix(source, "error") {
+		loadLevel = "error"
+	} else if strings.Contains(source, "corrupt") {
+		loadLevel = "warn"
+	}
+	globalWorker.Logs().append(LogEntry{
+		Timestamp: time.Now(), Level: loadLevel, Scope: "system",
+		Message: "state file: " + statePath + " (loaded: " + source + ")",
+	})
+	if authListErr != nil {
+		globalWorker.Logs().append(LogEntry{
+			Timestamp: time.Now(), Level: "warn", Scope: "system",
+			Message: "auth list for state-dir derivation failed: " + authListErr.Error() + "; state may not survive container recreates",
+		})
+	}
 	// Restore persisted logs into the ring so they survive CPA restarts.
 	if len(loaded.Logs) > 0 {
 		globalWorker.Logs().load(loaded.Logs)
@@ -388,7 +419,10 @@ func restartWorkerFromState() {
 		}
 		globalState.Logs = w.Logs().all()
 		pluginStateMu.Unlock()
-		debouncedSaveState(defaultStatePath())
+		if globalStatePath == "" {
+			globalStatePath = defaultStatePath() // defensive: never expected
+		}
+		debouncedSaveState(globalStatePath)
 	}
 	globalWorker = w
 	if globalHandlers != nil {
@@ -561,9 +595,10 @@ func getAuthJSONViaHost(authIndex string) (json.RawMessage, error) {
 }
 
 func defaultStatePath() string {
-	// State lives in the user config dir (e.g. %APPDATA%\CLIProxyAPI\codex-auto-reset	// on Windows, ~/.config/CLIProxyAPI/codex-auto-reset/ on Linux) so it survives
-	// CPA reinstalls and working-directory changes. Mirrors codex-quota-scheduler's
-	// resolveDefaultStatePath.
+	// Legacy default: the OS user config dir (e.g. %APPDATA%\CLIProxyAPI\
+	// codex-auto-reset on Windows, ~/.config/CLIProxyAPI/codex-auto-reset/
+	// on Linux). Inside containers this path is ephemeral unless explicitly
+	// volume-mounted, which is why resolveStatePath prefers CPA's auth dir.
 	dir, err := os.UserConfigDir()
 	if err != nil || dir == "" {
 		dir = "."
@@ -571,30 +606,38 @@ func defaultStatePath() string {
 	return filepath.Join(dir, "CLIProxyAPI", "codex-auto-reset", "state.json")
 }
 
+// resolveStatePath picks the state file location, most-durable first:
+//
+//  1. explicit absolute state_dir from the plugin's config_yaml (operator
+//     override; CPA's config.yaml lives on a mounted volume in container
+//     deployments, so the override itself is durable)
+//  2. <auth-dir>/plugin-state/codex-auto-reset/state.json — CPA's auth dir,
+//     derived from host.auth.list entry paths. Operators volume-mount the
+//     auth dir (credentials must survive), so state here survives image
+//     updates and container recreates. The subdirectory keeps plugin state
+//     out of CPA's auth-file scan root.
+//  3. <os-user-config-dir>/CLIProxyAPI/codex-auto-reset/state.json — the
+//     0.1.7+ default (defaultStatePath)
+//
+// The fallback chain is also the migration chain: configurePlugin moves any
+// existing state forward to the resolved primary exactly once.
+func resolveStatePath(stateDir string, authEntries []pluginapi.HostAuthFileEntry) string {
+	if dir := strings.TrimSpace(stateDir); dir != "" && filepath.IsAbs(dir) {
+		return filepath.Join(dir, "state.json")
+	}
+	for _, e := range authEntries {
+		if e.Path != "" && filepath.IsAbs(e.Path) {
+			return filepath.Join(filepath.Dir(e.Path), "plugin-state", "codex-auto-reset", "state.json")
+		}
+	}
+	return defaultStatePath()
+}
+
 // legacyStatePath is the pre-0.1.7 location: a relative filename resolved against
 // CPA's working directory. migrateLegacyState moves it to the new location once,
 // so statistics and logs survive the upgrade.
 func migrateLegacyState(newPath string) {
-	legacy := "codex-auto-reset.state.json"
-	if legacy == newPath {
-		return
-	}
-	raw, err := os.ReadFile(legacy)
-	if err != nil {
-		return // no legacy file — nothing to migrate
-	}
-	if _, err := os.Stat(newPath); err == nil {
-		return // new state already exists; keep it
-	}
-	var state PluginState
-	if err := json.Unmarshal(raw, &state); err != nil {
-		return
-	}
-	if err := saveState(newPath, &state); err != nil {
-		return
-	}
-	// Keep the legacy file as .migrated for safety rather than deleting it.
-	_ = os.Rename(legacy, legacy+".migrated")
+	migrateStateFile("codex-auto-reset.state.json", newPath)
 }
 
 // backfillResetHistoryFromLogs scans persisted logs for "reset verified OK" /

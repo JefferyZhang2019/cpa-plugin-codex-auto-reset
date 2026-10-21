@@ -1,8 +1,11 @@
 package main
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 func TestPluginRegistration(t *testing.T) {
@@ -117,5 +120,57 @@ func TestBackfillResetHistory_StillBackfillsOldLogs(t *testing.T) {
 	backfillResetHistoryFromLogs(state)
 	if len(state.ResetHistory) != 1 || !state.ResetHistory[0].Success {
 		t.Fatalf("expected 1 backfilled success, got %+v", state.ResetHistory)
+	}
+}
+
+// TestResolveStatePath_Precedence verifies the durability ladder: explicit
+// absolute state_dir wins, then the auth-dir-derived location (what makes
+// state survive container recreates), then the legacy user-config default.
+// Relative/empty overrides and unusable auth paths must fall through.
+// Paths are built platform-neutrally (tests run on Windows and Linux).
+func TestResolveStatePath_Precedence(t *testing.T) {
+	tmp := t.TempDir()
+	explicit := filepath.Join(tmp, "persist")
+	authDir := filepath.Join(tmp, "auths")
+	entries := []pluginapi.HostAuthFileEntry{
+		{AuthIndex: "runtime-only"}, // no Path — skipped
+		{AuthIndex: "codex-1", Path: filepath.Join(authDir, "codex-1.json")},
+	}
+	derived := filepath.Join(authDir, "plugin-state", "codex-auto-reset", "state.json")
+	cases := []struct {
+		name     string
+		stateDir string
+		entries  []pluginapi.HostAuthFileEntry
+		want     string
+	}{
+		{"explicit wins", explicit, entries, filepath.Join(explicit, "state.json")},
+		{"explicit trimmed", "  " + explicit + "  ", entries, filepath.Join(explicit, "state.json")},
+		{"relative override ignored", "relative", entries, derived},
+		{"auth dir derived", "", entries, derived},
+		{"relative auth path ignored", "", []pluginapi.HostAuthFileEntry{{Path: "auths/codex-1.json"}}, defaultStatePath()},
+		{"no auth entries falls back", "", nil, defaultStatePath()},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolveStatePath(tc.stateDir, tc.entries)
+			if got != tc.want {
+				t.Fatalf("resolveStatePath(%q, ...) = %q, want %q", tc.stateDir, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestResolveStatePath_PlacesStateUnderAuthDir documents the container case
+// that motivated the auth-dir anchor: state lands under the auth dir (the
+// tree operators volume-mount), not the ephemeral user-config dir.
+func TestResolveStatePath_PlacesStateUnderAuthDir(t *testing.T) {
+	authDir := t.TempDir()
+	entries := []pluginapi.HostAuthFileEntry{
+		{AuthIndex: "a", Path: filepath.Join(authDir, "codex-team.json")},
+	}
+	got := resolveStatePath("", entries)
+	want := filepath.Join(authDir, "plugin-state", "codex-auto-reset", "state.json")
+	if got != want {
+		t.Fatalf("state not under auth dir: got %q want %q", got, want)
 	}
 }

@@ -284,7 +284,10 @@ func (h *managementHandlers) putSettings(body []byte) (int, []byte) {
 		req.TriggerLeadTime = parsed.TriggerLeadTime.String()
 		req.EnabledAccounts = parsed.EnabledAccounts
 	}
-	cfg := Config{EnabledAccounts: req.EnabledAccounts}
+	h.mu.Lock()
+	// state_dir is operator-only (config_yaml); a UI save must not drop it.
+	cfg := Config{EnabledAccounts: req.EnabledAccounts, StateDir: h.state.Config.StateDir}
+	h.mu.Unlock()
 	if req.RefreshInterval != "" {
 		d, err := time.ParseDuration(req.RefreshInterval)
 		if err != nil {

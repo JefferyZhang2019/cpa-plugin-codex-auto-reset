@@ -24,7 +24,7 @@ func TestState_SaveLoadRoundTrip(t *testing.T) {
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("state file not written: %v", err)
 	}
-	loaded, err := loadState(path)
+	loaded, _, err := loadState(path)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -41,7 +41,7 @@ func TestState_SaveLoadRoundTrip(t *testing.T) {
 
 func TestState_LoadMissingReturnsEmpty(t *testing.T) {
 	dir := t.TempDir()
-	loaded, err := loadState(filepath.Join(dir, "nonexistent.json"))
+	loaded, _, err := loadState(filepath.Join(dir, "nonexistent.json"))
 	if err != nil {
 		t.Fatalf("load missing: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestMigrateLegacyState_MigratesAndKeepsBackup(t *testing.T) {
 	migrateLegacyState(newPath)
 
 	// New location must contain the data.
-	got, err := loadState(newPath)
+	got, _, err := loadState(newPath)
 	if err != nil {
 		t.Fatalf("load migrated: %v", err)
 	}
@@ -164,11 +164,182 @@ func TestMigrateLegacyState_DoesNotOverwriteExisting(t *testing.T) {
 
 	migrateLegacyState(newPath)
 
-	got, err := loadState(newPath)
+	got, _, err := loadState(newPath)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
 	if len(got.ResetHistory) != 1 || got.ResetHistory[0].AuthID != "new" {
 		t.Fatalf("existing state was overwritten: %+v", got.ResetHistory)
+	}
+}
+
+// TestMigrateStateFile_MigratesOnceAndKeepsSource verifies the generic
+// forward migration: data lands at the destination, the source is kept as
+// .migrated, and a second run cannot overwrite an existing destination.
+func TestMigrateStateFile_MigratesOnceAndKeepsSource(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "old", "state.json")
+	dst := filepath.Join(dir, "new", "state.json")
+	old := &PluginState{
+		Config:       Config{RefreshInterval: 9 * time.Hour, TriggerLeadTime: 5 * time.Hour, EnabledAccounts: []string{"acct"}},
+		Accounts:     map[string]AccountRuntime{},
+		ResetHistory: []ResetRecord{{AuthID: "acct", Success: true, PostWeeklyPct: 100}},
+	}
+	if err := saveState(src, old); err != nil {
+		t.Fatalf("save src: %v", err)
+	}
+
+	if !migrateStateFile(src, dst) {
+		t.Fatal("first migration reported no-op")
+	}
+	got, source, err := loadState(dst)
+	if err != nil || source != "main" {
+		t.Fatalf("load migrated: source=%s err=%v", source, err)
+	}
+	if len(got.ResetHistory) != 1 || len(got.Config.EnabledAccounts) != 1 {
+		t.Fatalf("migration lost data: %+v", got)
+	}
+	if _, err := os.Stat(src); !os.IsNotExist(err) {
+		t.Fatalf("source not moved away: %v", err)
+	}
+	if _, err := os.Stat(src + ".migrated"); err != nil {
+		t.Fatalf("source backup missing: %v", err)
+	}
+	// Second run: destination exists — must not overwrite it.
+	if migrateStateFile(src+".migrated", dst) {
+		t.Fatal("second migration must not overwrite the destination")
+	}
+}
+
+// TestMigrateStateFile_MissingSourceIsNoOp covers the common boot path where
+// there is simply nothing to migrate.
+func TestMigrateStateFile_MissingSourceIsNoOp(t *testing.T) {
+	dir := t.TempDir()
+	if migrateStateFile(filepath.Join(dir, "none.json"), filepath.Join(dir, "dst", "state.json")) {
+		t.Fatal("missing source must be a no-op")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "dst")); !os.IsNotExist(err) {
+		t.Fatalf("destination should not be created: %v", err)
+	}
+}
+
+// TestLoadState_CorruptMainRecoversFromBackup verifies the recovery ladder:
+// a corrupt main file is quarantined (bytes preserved) and the one-generation
+// .bak is loaded instead of silently starting empty.
+func TestLoadState_CorruptMainRecoversFromBackup(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	good := &PluginState{
+		Config:       DefaultConfig(),
+		Accounts:     map[string]AccountRuntime{},
+		ResetHistory: []ResetRecord{{AuthID: "a", Success: true}},
+	}
+	if err := saveState(path, good); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	// Load once so the .bak exists, then corrupt the main file.
+	if _, source, err := loadState(path); err != nil || source != "main" {
+		t.Fatalf("prime load: source=%s err=%v", source, err)
+	}
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("corrupt: %v", err)
+	}
+
+	got, source, err := loadState(path)
+	if err != nil {
+		t.Fatalf("load with corrupt main: %v", err)
+	}
+	if !strings.HasPrefix(source, "corrupt-main,backup") {
+		t.Fatalf("source = %q, want corrupt-main,backup*", source)
+	}
+	if len(got.ResetHistory) != 1 || !got.ResetHistory[0].Success {
+		t.Fatalf("backup data not recovered: %+v", got.ResetHistory)
+	}
+	// The corrupt bytes must be preserved for inspection, not destroyed.
+	quarantined := false
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "state.json.corrupt-") {
+			quarantined = true
+		}
+	}
+	if !quarantined {
+		t.Fatalf("corrupt file was not quarantined: %v", entries)
+	}
+}
+
+// TestLoadState_CorruptMainNoBackupStartsFresh verifies that with no usable
+// backup, a corrupt main still yields a valid empty state (and the bytes are
+// quarantined rather than overwritten in place).
+func TestLoadState_CorruptMainNoBackupStartsFresh(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	if err := os.WriteFile(path, []byte("]]]garbage"), 0o600); err != nil {
+		t.Fatalf("corrupt: %v", err)
+	}
+	got, source, err := loadState(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if source != "corrupt-main,fresh-after-corrupt" {
+		t.Fatalf("source = %q", source)
+	}
+	if got == nil || got.Accounts == nil || len(got.Accounts) != 0 {
+		t.Fatalf("want fresh empty state, got %+v", got)
+	}
+}
+
+// TestLoadState_MissingMainFallsBackToBackup covers main deleted/lost but
+// the .bak still present.
+func TestLoadState_MissingMainFallsBackToBackup(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	if err := saveState(path, &PluginState{Config: DefaultConfig(), ResetHistory: []ResetRecord{{AuthID: "b"}}}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if _, _, err := loadState(path); err != nil { // prime .bak
+		t.Fatalf("prime: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove main: %v", err)
+	}
+	got, source, err := loadState(path)
+	if err != nil || source != "backup" {
+		t.Fatalf("load: source=%s err=%v", source, err)
+	}
+	if len(got.ResetHistory) != 1 {
+		t.Fatalf("backup not used: %+v", got.ResetHistory)
+	}
+}
+
+// TestLoadState_RefreshesBackupAfterGoodLoad verifies the one-generation
+// backup is kept current after every successful main-file load.
+func TestLoadState_RefreshesBackupAfterGoodLoad(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	first := &PluginState{Config: DefaultConfig(), ResetHistory: []ResetRecord{{AuthID: "one"}}}
+	if err := saveState(path, first); err != nil {
+		t.Fatalf("save1: %v", err)
+	}
+	if _, _, err := loadState(path); err != nil {
+		t.Fatalf("load1: %v", err)
+	}
+	second := &PluginState{Config: DefaultConfig(), ResetHistory: []ResetRecord{{AuthID: "one"}, {AuthID: "two"}}}
+	if err := saveState(path, second); err != nil {
+		t.Fatalf("save2: %v", err)
+	}
+	if _, _, err := loadState(path); err != nil {
+		t.Fatalf("load2: %v", err)
+	}
+	// Simulate main loss; the .bak must hold the NEWEST generation.
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	got, source, err := loadState(path)
+	if err != nil || source != "backup" {
+		t.Fatalf("load: source=%s err=%v", source, err)
+	}
+	if len(got.ResetHistory) != 2 {
+		t.Fatalf("stale backup: %+v", got.ResetHistory)
 	}
 }

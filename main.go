@@ -62,8 +62,8 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 var (
@@ -72,7 +72,7 @@ var (
 	globalState   = &PluginState{Accounts: map[string]AccountRuntime{}}
 	globalWorker  *Worker
 	globalHandlers *managementHandlers
-	pluginVersion = "0.1.10"
+	pluginVersion = "2.0.0"
 )
 
 func main() {}

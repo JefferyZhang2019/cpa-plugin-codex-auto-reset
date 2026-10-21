@@ -305,21 +305,24 @@ func TestWorker_ManagementCheckRespectsPinnedCycle(t *testing.T) {
 	for _, route := range []string{"check", "check/all"} {
 		t.Run(route, func(t *testing.T) {
 			w, fsm, fc, clock, trigger := armedWorkerFixture(t)
+			listsBefore := fc.listCalls
 			h := newManagementHandlers(&PluginState{Config: w.cfg}, "", w)
 			status, body, _ := h.handle("POST", "/v0/management/plugins/codex-auto-reset/"+route, nil, []byte(`{"auth_index":"acct"}`))
-			if status != 200 || !fsm.NextWake().Equal(clock.t) {
-				t.Fatalf("check: status=%d body=%s wake=%v", status, body, fsm.NextWake())
+			// Check on an ARMED account keeps the pinned trigger wake and
+			// burns no list call; the confirm at T revalidates anyway.
+			if status != 200 || !fsm.NextWake().Equal(trigger) {
+				t.Fatalf("check: status=%d body=%s wake=%v, want unchanged trigger %v", status, body, fsm.NextWake(), trigger)
+			}
+			if fc.listCalls != listsBefore {
+				t.Fatalf("check burned %d extra list calls on ARMED account", fc.listCalls-listsBefore)
 			}
 			select {
 			case <-w.wakeCh:
 			default:
 				t.Fatal("check did not wake worker")
 			}
-			w.stepAccountSafe("acct")
-			w.stepAccountSafe("acct")
-			if fsm.State() != StateARMED || !fsm.NextWake().Equal(trigger) || fsm.attempt.RedeemRequestID != "" || fc.consumeCalls != 0 {
-				t.Fatalf("early check: state=%s wake=%v attempt=%+v", fsm.State(), fsm.NextWake(), fsm.attempt)
-			}
+			// External redemption before T still abandons at T without
+			// substituting the replacement credit.
 			fc.credits["a"].Status = "redeemed"
 			clock.t = trigger
 			w.stepAccountSafe("acct")
@@ -331,6 +334,65 @@ func TestWorker_ManagementCheckRespectsPinnedCycle(t *testing.T) {
 				t.Fatalf("abandoned cycle: state=%s consumed=%v wake=%v", fsm.State(), fc.consumeIDs, fsm.NextWake())
 			}
 		})
+	}
+}
+
+// TestWorker_TriggerCheckOnlyPullsIDLE verifies Check semantics per state:
+// IDLE is pulled to an immediate patrol, while RESETTING (retry backoff) and
+// VERIFYING (verify delay) keep their schedule instead of being bypassed.
+func TestWorker_TriggerCheckOnlyPullsIDLE(t *testing.T) {
+	w, fsm, fc, clock, trigger := armedWorkerFixture(t)
+	fc.failFirstN = 1
+	fc.failErr = errString("temporary failure")
+	clock.t = trigger
+
+	// Drive to RESETTING with a pending retry backoff.
+	w.stepAccountSafe("acct") // ARMED -> CONFIRMING
+	w.stepAccountSafe("acct") // CONFIRMING -> RESETTING (attempt minted, no POST yet)
+	w.stepAccountSafe("acct") // first POST fails -> retry backoff scheduled
+	if fsm.State() != StateRESETTING {
+		t.Fatalf("state=%s, want RESETTING", fsm.State())
+	}
+	if fc.consumeCalls != 1 {
+		t.Fatalf("consumeCalls=%d, want 1 failed attempt", fc.consumeCalls)
+	}
+	backoff := fsm.NextWake()
+	if !backoff.After(clock.t) {
+		t.Fatalf("no backoff scheduled: wake=%v now=%v", backoff, clock.t)
+	}
+	if err := w.TriggerCheck("acct"); err != nil {
+		t.Fatal(err)
+	}
+	if !fsm.NextWake().Equal(backoff) {
+		t.Fatalf("check bypassed retry backoff: wake=%v, want %v", fsm.NextWake(), backoff)
+	}
+
+	// Advance past the backoff; the retry succeeds and enters VERIFYING.
+	clock.t = backoff
+	w.stepAccountSafe("acct")
+	if fsm.State() != StateVERIFYING {
+		t.Fatalf("state=%s, want VERIFYING", fsm.State())
+	}
+	verifyDue := fsm.NextWake()
+	if err := w.TriggerCheck("acct"); err != nil {
+		t.Fatal(err)
+	}
+	if !fsm.NextWake().Equal(verifyDue) {
+		t.Fatalf("check bypassed verify delay: wake=%v, want %v", fsm.NextWake(), verifyDue)
+	}
+
+	// Complete verification; the settled FSM is IDLE and Check now pulls it.
+	clock.t = verifyDue
+	w.stepAccountSafe("acct")
+	if fsm.State() != StateIDLE {
+		t.Fatalf("state=%s, want IDLE", fsm.State())
+	}
+	patrol := fsm.NextWake()
+	if err := w.TriggerCheck("acct"); err != nil {
+		t.Fatal(err)
+	}
+	if !fsm.NextWake().Equal(clock.t) || fsm.NextWake().Equal(patrol) {
+		t.Fatalf("check did not pull IDLE account: wake=%v patrol=%v", fsm.NextWake(), patrol)
 	}
 }
 

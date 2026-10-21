@@ -72,7 +72,7 @@ var (
 	globalState   = &PluginState{Accounts: map[string]AccountRuntime{}}
 	globalWorker  *Worker
 	globalHandlers *managementHandlers
-	pluginVersion = "0.1.9"
+	pluginVersion = "0.1.10"
 )
 
 func main() {}

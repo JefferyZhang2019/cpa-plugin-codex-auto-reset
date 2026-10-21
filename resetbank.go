@@ -42,6 +42,12 @@ type AccountFSM struct {
 	verifyDue         time.Time
 	scheduledCreditID string
 	manualReset       bool
+	// testPostStep, when non-nil, runs inside StepAndSettle after the tick
+	// but BEFORE the settle decision, with mu still held. Tests use it to
+	// prove that a concurrent ForceConfirm/TriggerCheck cannot interleave
+	// into the (old, racy) gap between step and schedule write. Production
+	// leaves it nil.
+	testPostStep func()
 	// pendingHistory is set in stepVERIFYING with the reset result. NOT cleared
 	// by Reset() so the worker can collect it after the cycle ends. The worker
 	// sets it back to nil after collecting.
@@ -112,9 +118,17 @@ func (f *AccountFSM) ForceConfirm() {
 // Step takes the FSM mutex for the whole tick; HTTP calls happen under lock,
 // which is fine because the FSM is driven by a single worker goroutine (no
 // other caller Step()s the same FSM).
+//
+// Step is the raw tick surface used by tests and simulations. The worker
+// drives FSMs via StepAndSettle, which additionally completes the DONE→IDLE
+// transition atomically (see its comment for why that must not be split).
 func (f *AccountFSM) Step() time.Time {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	return f.stepLocked()
+}
+
+func (f *AccountFSM) stepLocked() time.Time {
 	switch f.state {
 	case StateIDLE:
 		return f.stepIDLE()
@@ -130,6 +144,32 @@ func (f *AccountFSM) Step() time.Time {
 		return time.Time{}
 	}
 	return time.Time{}
+}
+
+// StepAndSettle executes one tick and, under the same mutex hold, settles the
+// post-tick schedule: when the cycle terminated (DONE) it performs the
+// DONE→IDLE reset (clearing the pinned target and manual intent) and
+// schedules the next patrol at now+refresh_interval; otherwise it records the
+// wake the tick returned as nextWake. Returns the settled wake.
+//
+// Step + settle in one critical section closes the strand race where a
+// ForceConfirm or TriggerCheck landing between the worker's Step() return and
+// its follow-up Reset()/SetNextWake() could be overwritten with a zero wake —
+// leaving a CONFIRMING FSM that soonest() skips forever. Manual triggers take
+// the same mutex, so they are now ordered entirely before or after the settle.
+func (f *AccountFSM) StepAndSettle() time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	wake := f.stepLocked()
+	if f.testPostStep != nil {
+		f.testPostStep() // test-only interleaving hook; mu is still held
+	}
+	if wake.IsZero() && f.state == StateDONE {
+		f.resetLocked()
+		wake = f.now().Add(f.Cfg.RefreshInterval)
+	}
+	f.nextWake = wake
+	return wake
 }
 
 func (f *AccountFSM) now() time.Time {
@@ -429,6 +469,11 @@ func (f *AccountFSM) stepVERIFYING() time.Time {
 func (f *AccountFSM) Reset() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.resetLocked()
+}
+
+// resetLocked is Reset's body for callers already holding mu (StepAndSettle).
+func (f *AccountFSM) resetLocked() {
 	f.state = StateIDLE
 	f.attempt = ResetAttempt{}
 	f.verifyDue = time.Time{}

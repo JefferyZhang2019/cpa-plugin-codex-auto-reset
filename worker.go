@@ -113,16 +113,21 @@ func (w *Worker) Stop() {
 	w.mu.Unlock()
 }
 
-// TriggerCheck forces nextWake=now for one account (or all, if authID is
-// empty) and wakes the sleeping loop, so the trigger takes effect
-// immediately. Returns an error when the account is not in the FSM map
-// (typically: not enabled in settings).
+// TriggerCheck pulls IDLE accounts to an immediate patrol (nextWake=now,
+// or all IDLE accounts if authID is empty) and wakes the sleeping loop.
+// Accounts inside an active cycle keep their schedule: pulling ARMED early
+// would only burn a confirm-time re-list (CONFIRMING revalidates the trigger
+// time and re-arms anyway), and pulling RESETTING/VERIFYING early would
+// bypass the retry backoff / verify delay for no benefit. Returns an error
+// when the account is not in the FSM map (typically: not enabled in settings).
 func (w *Worker) TriggerCheck(authID string) error {
 	w.mu.Lock()
 	now := w.nowFn()
 	if authID == "" {
 		for _, fsm := range w.fsms {
-			fsm.SetNextWake(now)
+			if fsm.State() == StateIDLE {
+				fsm.SetNextWake(now)
+			}
 		}
 		w.mu.Unlock()
 		w.wake()
@@ -133,7 +138,9 @@ func (w *Worker) TriggerCheck(authID string) error {
 		w.mu.Unlock()
 		return fmt.Errorf("account %q not found (is it enabled?)", authID)
 	}
-	fsm.SetNextWake(now)
+	if fsm.State() == StateIDLE {
+		fsm.SetNextWake(now)
+	}
 	w.mu.Unlock()
 	w.wake()
 	return nil
@@ -257,13 +264,11 @@ func (w *Worker) stepAccountSafe(authID string) {
 	fsm.Client = client
 	fsm.mu.Unlock()
 
-	wake := fsm.Step()
-	if wake.IsZero() && fsm.State() == StateDONE {
-		fsm.Reset()
-		fsm.SetNextWake(w.nowFn().Add(w.cfg.RefreshInterval))
-	} else {
-		fsm.SetNextWake(wake)
-	}
+	// Atomic tick + DONE settle: the DONE→IDLE reset and the nextWake write
+	// happen under one FSM mutex hold, so a concurrent ForceConfirm/TriggerCheck
+	// can never land between them and be overwritten with a zero wake (which
+	// would strand the FSM — soonest() skips zero wakes forever).
+	fsm.StepAndSettle()
 
 	// Mirror FSM state into the persisted PluginState.
 	if w.StateSync != nil {

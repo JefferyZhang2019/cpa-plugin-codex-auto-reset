@@ -41,9 +41,11 @@ missing target ID also abandons the cycle. Credits with no expiry are never
 automatically redeemed; if the pinned target becomes non-expiring, that cycle
 is abandoned. The next IDLE patrol can schedule a new cycle normally.
 
-**Check** (including Check All) only wakes the worker; it does not authorize
-an early reset. Confirmation rechecks the target's current expiry and waits
-until its updated trigger time. **Reset** explicitly requests immediate manual
+**Check** (including Check All) pulls only IDLE accounts to an immediate
+patrol; it never authorizes an early reset. Accounts inside an active cycle
+(armed, retrying, verifying) keep their schedule — confirmation still
+rechecks the target's current expiry and waits until its updated trigger
+time, so an early wake cannot bypass it. **Reset** explicitly requests immediate manual
 confirmation, clears the old automatic target, and selects the currently
 soonest-expiring available credit, even far before its trigger time (or with
 no expiry). It still runs the full confirm, consume, and verify flow. Repeated
@@ -247,7 +249,8 @@ Before relying on this plugin in production, verify against real OpenAI:
 - [ ] After a successful reset, the weekly quota recovers to 100%.
 - [ ] Deferral: after a manual Check in IDLE with no imminent credit, the next
       patrol is `refresh_interval` from the manual check's completion time.
-- [ ] Check while ARMED does not consume before the pinned target's trigger time.
+- [ ] Check while ARMED neither pulls the trigger wake forward nor consumes
+      before the pinned target's trigger time.
 - [ ] Redeeming the pinned target externally while ARMED abandons that cycle
       without consuming a different credit.
 

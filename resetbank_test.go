@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -563,4 +564,69 @@ func TestFSM_NeverExpiringAutomaticCredit(t *testing.T) {
 			t.Fatalf("state=%s attempt=%+v, want abandon non-expiring target", fsm.State(), fsm.attempt)
 		}
 	})
+}
+
+// TestFSM_StepAndSettleResetsDoneAndSchedulesPatrol verifies the atomic
+// settle: a terminating tick lands in IDLE (never DONE), carries the pin and
+// manual-intent cleanup of Reset, and schedules the next patrol at
+// completion + refresh_interval.
+func TestFSM_StepAndSettleResetsDoneAndSchedulesPatrol(t *testing.T) {
+	fsm, fc, clock, trigger := armedFSMFixture(t)
+	fc.credits["a"].Status = "redeemed" // confirm at T will abandon -> DONE
+	clock.t = trigger
+	fsm.Step() // ARMED -> CONFIRMING (wake=now)
+
+	wake := fsm.StepAndSettle()
+	want := trigger.Add(fsm.Cfg.RefreshInterval)
+	if fsm.State() != StateIDLE || !wake.Equal(want) || !fsm.NextWake().Equal(want) {
+		t.Fatalf("settle: state=%s wake=%v nextWake=%v, want IDLE patrol at %v", fsm.State(), wake, fsm.NextWake(), want)
+	}
+	if fsm.scheduledCreditID != "" || fsm.manualReset {
+		t.Fatalf("settle leaked cycle metadata: pin=%q manual=%v", fsm.scheduledCreditID, fsm.manualReset)
+	}
+}
+
+// TestFSM_StepAndSettleAtomicWithForceConfirm deterministically reproduces
+// the strand race's interleaving: a manual reset fired exactly in the window
+// between the tick's return and the schedule write (testPostStep runs there,
+// with mu held). Because step+settle share one critical section, the
+// ForceConfirm cannot slip inside; it applies after the settle and the FSM
+// keeps a non-zero wake instead of being stranded in CONFIRMING with a zero
+// wake that soonest() would skip forever.
+func TestFSM_StepAndSettleAtomicWithForceConfirm(t *testing.T) {
+	fsm, fc, clock, trigger := armedFSMFixture(t)
+	fc.credits["a"].Status = "redeemed" // tick will abandon -> DONE at settle
+	clock.t = trigger
+	fsm.Step() // ARMED -> CONFIRMING
+
+	var mgmtDone chan struct{}
+	fsm.testPostStep = func() {
+		mgmtDone = make(chan struct{})
+		go func() {
+			defer close(mgmtDone)
+			fsm.ForceConfirm()
+		}()
+		runtime.Gosched() // let the goroutine pile onto the held mutex
+	}
+	fsm.StepAndSettle()
+	<-mgmtDone
+	fsm.testPostStep = nil // one interleaving is enough; stop firing in the drive loop
+
+	if fsm.State() != StateCONFIRMING || fsm.NextWake().IsZero() || !fsm.manualReset || fsm.scheduledCreditID != "" {
+		t.Fatalf("manual reset stranded: state=%s wake=%v manual=%v pin=%q",
+			fsm.State(), fsm.NextWake(), fsm.manualReset, fsm.scheduledCreditID)
+	}
+	if !fsm.NextWake().Equal(clock.t) {
+		t.Fatalf("manual wake=%v, want now=%v", fsm.NextWake(), clock.t)
+	}
+
+	// The manual reset must still complete: it picks the remaining credit b.
+	for i := 0; i < 5 && fsm.State() != StateIDLE; i++ {
+		if wake := fsm.StepAndSettle(); !wake.IsZero() {
+			clock.t = wake
+		}
+	}
+	if fsm.State() != StateIDLE || fc.consumeCalls != 1 || fc.consumeIDs[0] != "b" {
+		t.Fatalf("manual cycle after settle: state=%s consumed=%v, want b redeemed", fsm.State(), fc.consumeIDs)
+	}
 }

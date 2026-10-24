@@ -18,8 +18,8 @@ type AccountLister func() ([]AccountOption, error)
 // AccountOption is one selectable Codex account for the UI's checkbox list.
 type AccountOption struct {
 	AuthIndex string `json:"auth_index"`
-	ID        string `json:"id,omitempty"`  // credential ID / file name (e.g. codex-44411af1-email-team.json)
-	Name      string `json:"name"`          // human-readable display label (id, then name, then email, then auth_index)
+	ID        string `json:"id,omitempty"` // credential ID / file name (e.g. codex-44411af1-email-team.json)
+	Name      string `json:"name"`         // human-readable display label (id, then name, then email, then auth_index)
 	Email     string `json:"email,omitempty"`
 	Account   string `json:"account,omitempty"` // ChatGPT account ID
 	Enabled   bool   `json:"enabled"`           // true if currently in EnabledAccounts
@@ -29,12 +29,12 @@ type AccountOption struct {
 // routes from spec §9. The HTML resource page (Task 12) is rendered by
 // renderStatusHTML, called from the resource/status route.
 type managementHandlers struct {
-	mu        sync.Mutex
-	state     *PluginState
-	statePath string
-	worker    *Worker
-	lister    AccountLister        // may be nil if host ABI not wired (tests)
-	OnSettingsChanged func()       // injected by main.go; restarts the worker with new config
+	mu                sync.Mutex
+	state             *PluginState
+	statePath         string
+	worker            *Worker
+	lister            AccountLister // may be nil if host ABI not wired (tests)
+	OnSettingsChanged func()        // injected by main.go; restarts the worker with new config
 }
 
 func newManagementHandlers(state *PluginState, statePath string, worker *Worker) *managementHandlers {
@@ -59,6 +59,15 @@ func isResourcePath(path string) bool {
 // distinguish HTML (resource) from JSON (management) responses for /status.
 func (h *managementHandlers) handle(method, rawPath string, headers http.Header, body []byte) (int, []byte, string) {
 	path := normalizePath(rawPath)
+	// Resource routes are unauthenticated (CPA serves them for browser
+	// navigation) and must stay read-only. The host currently forwards only
+	// GET to registered resource routes, but enforce the boundary here too so
+	// a future host change cannot turn this into an unauthenticated mutation
+	// surface (quota-scheduler issue #1).
+	if isResourcePath(rawPath) && !(method == http.MethodGet && path == "/status") {
+		st, b := jsonStatus(http.StatusNotFound, map[string]any{"error": "route not found"})
+		return st, b, "application/json"
+	}
 	switch {
 	case method == http.MethodGet && path == "/status":
 		// Same path serves HTML (resource load) or JSON (management API).
@@ -210,16 +219,16 @@ func (h *managementHandlers) debugAuthList() (int, []byte, string) {
 		return st, b, "application/json"
 	}
 	type diag struct {
-		ID          string `json:"id"`
-		AuthIndex   string `json:"auth_index"`
-		Provider    string `json:"provider"`
-		Type        string `json:"type"`
-		Name        string `json:"name"`
-		Email       string `json:"email"`
-		Disabled    bool   `json:"disabled"`
-		Unavailable bool   `json:"unavailable"`
-		MatchesCodex bool  `json:"matches_codex"`
-		Skipped     string `json:"skipped_reason,omitempty"`
+		ID           string `json:"id"`
+		AuthIndex    string `json:"auth_index"`
+		Provider     string `json:"provider"`
+		Type         string `json:"type"`
+		Name         string `json:"name"`
+		Email        string `json:"email"`
+		Disabled     bool   `json:"disabled"`
+		Unavailable  bool   `json:"unavailable"`
+		MatchesCodex bool   `json:"matches_codex"`
+		Skipped      string `json:"skipped_reason,omitempty"`
 	}
 	out := make([]diag, 0, len(auths))
 	for _, a := range auths {
@@ -316,7 +325,7 @@ func (h *managementHandlers) putSettings(body []byte) (int, []byte) {
 		h.OnSettingsChanged()
 	}
 	return jsonOK(map[string]any{
-		"refresh_interval": formatDuration(cfg.RefreshInterval),
+		"refresh_interval":  formatDuration(cfg.RefreshInterval),
 		"trigger_lead_time": formatDuration(cfg.TriggerLeadTime),
 		"enabled_accounts":  cfg.EnabledAccounts,
 	})
@@ -855,13 +864,32 @@ func renderStatusHTML(state *PluginState) string {
       // HTTP header names are case-insensitive; fetch() normalizes the key.
       return { 'authorization': auth };
     }
+    // apiRootPrefix derives the deployment prefix from the page URL so the UI
+    // works behind a reverse proxy at a subpath (e.g. /cpa/v0/resource/...)
+    // instead of only at the domain root. Mirrors the quota-scheduler fix for
+    // its issue #17. A root deployment yields an empty prefix.
+    function apiRootPrefix() {
+      const suffixes = [
+        '/v0/resource/plugins/codex-auto-reset/status',
+        '/v0/management/plugins/codex-auto-reset/status',
+        '/v0/resource/plugins/codex-auto-reset',
+        '/v0/management/plugins/codex-auto-reset'
+      ];
+      const path = location.pathname;
+      for (const suffix of suffixes) {
+        if (path.endsWith(suffix)) return path.slice(0, -suffix.length);
+      }
+      const index = path.indexOf('/v0/');
+      return index > 0 ? path.slice(0, index) : '';
+    }
+    const ROOT_PREFIX = apiRootPrefix();
     async function apiGet(path) {
-      const r = await fetch(path, { headers: authHeaders() });
+      const r = await fetch(ROOT_PREFIX + path, { headers: authHeaders() });
       if (!r.ok) throw new Error(path + ': ' + r.status);
       return r.json();
     }
     async function apiSend(method, path, body) {
-      const r = await fetch(path, {
+      const r = await fetch(ROOT_PREFIX + path, {
         method, headers: { ...authHeaders(), 'Content-Type': 'application/json' },
         body: body ? JSON.stringify(body) : undefined
       });

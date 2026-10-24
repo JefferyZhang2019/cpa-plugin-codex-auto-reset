@@ -22,6 +22,12 @@ const (
 	postResetVerifyDelay = 1 * time.Minute
 	maxLogEntries        = 1000
 	logRetention         = 7 * 24 * time.Hour
+	// credentialRetryInterval is how soon an enabled account is retried after
+	// its credentials fail to load (CPA auth file not ready at startup, token
+	// mid-refresh, or operator re-login). Previously a failed initial load
+	// left the account out of the FSM map forever, and a failure while running
+	// waited a full refresh_interval (default 12h).
+	credentialRetryInterval = 30 * time.Minute
 )
 
 var resetRetryDelays = []time.Duration{

@@ -126,6 +126,57 @@ func TestManagement_ImportRejectsBadJSON(t *testing.T) {
 	}
 }
 
+func TestStatusHTML_DerivesAPIRootFromPageURL(t *testing.T) {
+	// Subpath deployments (e.g. reverse proxy at /cpa) serve the resource page
+	// below /cpa, so the UI must not hardcode root-absolute /v0/management
+	// URLs. Mirror of quota-scheduler issue #17.
+	h := newManagementHandlers(&PluginState{Config: DefaultConfig(), Accounts: map[string]AccountRuntime{}}, "", nil)
+	_, body, _ := h.handle(http.MethodGet, "/v0/resource/plugins/codex-auto-reset/status", nil, nil)
+	html := string(body)
+	for _, want := range []string{
+		"function apiRootPrefix()",
+		"const ROOT_PREFIX = apiRootPrefix()",
+		"fetch(ROOT_PREFIX + path",
+		"'/v0/resource/plugins/codex-auto-reset/status'",
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("HTML missing API-root derivation %q", want)
+		}
+	}
+	if strings.Contains(html, "fetch('/v0/management") {
+		t.Fatalf("HTML still hardcodes a domain-root management URL; subpath deployments will break")
+	}
+}
+
+func TestResourcePath_RejectsStateChangingRequests(t *testing.T) {
+	// Resource routes are unauthenticated. Even though CPA currently forwards
+	// only GET to registered resource routes, the plugin must never execute a
+	// write arriving on that prefix (quota-scheduler issue #1).
+	srv := newTestManagement(t, DefaultConfig(), nil)
+	cases := []struct {
+		method string
+		suffix string
+		body   []byte
+	}{
+		{http.MethodPut, "/settings", []byte(`{"refresh_interval":"1h"}`)},
+		{http.MethodPost, "/reset", []byte(`{"auth_index":"a"}`)},
+		{http.MethodPost, "/check", []byte(`{"auth_index":"a"}`)},
+		{http.MethodPost, "/import", []byte(`{}`)},
+		{http.MethodGet, "/logs", nil},
+	}
+	for _, tc := range cases {
+		status, _, _ := srv.h.handle(tc.method, "/v0/resource/plugins/codex-auto-reset"+tc.suffix, nil, tc.body)
+		if status != http.StatusNotFound {
+			t.Fatalf("%s %s on resource path: status %d, want 404", tc.method, tc.suffix, status)
+		}
+	}
+	// The read-only page itself stays available.
+	status, _, contentType := srv.h.handle(http.MethodGet, "/v0/resource/plugins/codex-auto-reset/status", nil, nil)
+	if status != http.StatusOK || !strings.HasPrefix(contentType, "text/html") {
+		t.Fatalf("resource status: status=%d contentType=%q", status, contentType)
+	}
+}
+
 func TestStatusHTML_ResourcePathReturnsHTML(t *testing.T) {
 	// The browser resource path (/v0/resource/plugins/codex-auto-reset/status)
 	// must return the HTML page, NOT JSON. Regression guard for the bug where

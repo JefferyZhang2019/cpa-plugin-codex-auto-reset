@@ -42,6 +42,11 @@ type Worker struct {
 	wakeCh  chan struct{} // wakes the sleeping loop when a manual trigger changes nextWake
 	stopped bool
 
+	// missingRetryAt records when each enabled account whose credentials last
+	// failed to load should be retried. Without it, an account that fails its
+	// initial load is never added to fsms and soonest() skips it forever.
+	missingRetryAt map[string]time.Time
+
 	// testAccelerate, when true, makes Run advance the injected clock to the
 	// next wake time instead of sleeping in real time. Lets tests run a full
 	// multi-day FSM cycle in milliseconds. Production leaves this false.
@@ -54,7 +59,8 @@ func NewWorker(cfg Config, enabled []string, loader CredsLoader, nowFn func() ti
 	}
 	return &Worker{
 		cfg: cfg, enabled: enabled, loader: loader, nowFn: nowFn,
-		fsms: map[string]*AccountFSM{}, logs: newLogRing(maxLogEntries),
+		fsms: map[string]*AccountFSM{}, missingRetryAt: map[string]time.Time{},
+		logs:   newLogRing(maxLogEntries),
 		stopCh: make(chan struct{}), wakeCh: make(chan struct{}, 1),
 	}
 }
@@ -185,11 +191,10 @@ func (w *Worker) Run() {
 		}
 	}()
 
-	w.mu.Lock()
+	// ensureFSM takes the worker mutex itself, so don't hold it here.
 	for _, id := range w.enabled {
 		w.ensureFSM(id)
 	}
-	w.mu.Unlock()
 
 	for {
 		select {
@@ -197,11 +202,22 @@ func (w *Worker) Run() {
 			return
 		default:
 		}
+		// Accounts whose credentials failed to load are not in fsms and would
+		// otherwise be invisible to soonest() forever. Retry them on the
+		// credential backoff (and immediately if the backoff has elapsed).
+		w.retryMissingFSMs()
 		nextAcct, nextWake := w.soonest()
 		if nextAcct == "" {
-			// Nothing scheduled yet (e.g. all accounts failed initial cred
-			// load). Poll briefly so we don't spin a core.
-			w.sleepOrStop(100 * time.Millisecond)
+			// Nothing is scheduled: only missing-credential retries remain.
+			delay := w.nextMissingRetryDelay()
+			if delay <= 0 {
+				continue
+			}
+			if w.testAccelerate {
+				w.advanceClock(w.nowFn().Add(delay))
+			} else {
+				w.sleepOrStop(delay)
+			}
 			continue
 		}
 		now := w.nowFn()
@@ -249,11 +265,13 @@ func (w *Worker) stepAccountSafe(authID string) {
 	// Refresh credentials before stepping.
 	creds, client, err := w.loader(authID)
 	if err != nil {
+		next := w.nowFn().Add(credentialRetryInterval)
 		w.logs.append(LogEntry{
 			Timestamp: w.nowFn(), Level: "error", Scope: authID,
 			State: fsm.State(), Message: "credential load failed: " + err.Error(),
+			NextAction: "retry credential load", NextAt: &next,
 		})
-		fsm.SetNextWake(w.nowFn().Add(w.cfg.RefreshInterval))
+		fsm.SetNextWake(next)
 		return
 	}
 
@@ -277,14 +295,22 @@ func (w *Worker) stepAccountSafe(authID string) {
 }
 
 func (w *Worker) ensureFSM(id string) {
+	w.mu.Lock()
 	if _, ok := w.fsms[id]; ok {
+		w.mu.Unlock()
 		return
 	}
+	w.mu.Unlock()
+
 	creds, client, err := w.loader(id)
 	if err != nil {
+		w.mu.Lock()
+		w.missingRetryAt[id] = w.nowFn().Add(credentialRetryInterval)
+		w.mu.Unlock()
 		w.logs.append(LogEntry{
 			Timestamp: w.nowFn(), Level: "warn", Scope: id,
-			Message: "initial credential load failed: " + err.Error(),
+			Message:    "initial credential load failed: " + err.Error(),
+			NextAction: "retry credential load",
 		})
 		return
 	}
@@ -292,7 +318,58 @@ func (w *Worker) ensureFSM(id string) {
 	// Seed nextWake=now so the very first loop tick steps this FSM. Without
 	// this, a fresh FSM has zero nextWake and soonest() skips it forever.
 	fsm.SetNextWake(w.nowFn())
-	w.fsms[id] = fsm
+	w.mu.Lock()
+	if _, ok := w.fsms[id]; !ok {
+		w.fsms[id] = fsm
+		delete(w.missingRetryAt, id)
+	}
+	w.mu.Unlock()
+}
+
+// retryMissingFSMs re-attempts credential loads for enabled accounts that are
+// absent from fsms once their backoff has elapsed. Called by Run each loop.
+func (w *Worker) retryMissingFSMs() {
+	w.mu.Lock()
+	now := w.nowFn()
+	var retry []string
+	for _, id := range w.enabled {
+		if _, ok := w.fsms[id]; ok {
+			continue
+		}
+		if at, ok := w.missingRetryAt[id]; ok && now.Before(at) {
+			continue
+		}
+		retry = append(retry, id)
+	}
+	w.mu.Unlock()
+	for _, id := range retry {
+		w.ensureFSM(id)
+	}
+}
+
+// nextMissingRetryDelay reports how long the loop should sleep when no FSM
+// has a scheduled wake. A non-positive result means a retry is due now.
+func (w *Worker) nextMissingRetryDelay() time.Duration {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	now := w.nowFn()
+	var soonest time.Time
+	for _, id := range w.enabled {
+		if _, ok := w.fsms[id]; ok {
+			continue
+		}
+		at, ok := w.missingRetryAt[id]
+		if !ok {
+			return 0
+		}
+		if soonest.IsZero() || at.Before(soonest) {
+			soonest = at
+		}
+	}
+	if soonest.IsZero() {
+		return 100 * time.Millisecond // no enabled accounts; idle politely
+	}
+	return soonest.Sub(now)
 }
 
 func (w *Worker) makeLogFn(authID string) LogFn {

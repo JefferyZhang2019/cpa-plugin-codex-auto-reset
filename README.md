@@ -87,6 +87,14 @@ These requests use the Codex credentials already configured in CPA. The plugin
 uses the responses to calculate reset-credit expiry, target the soonest-expiring
 credit, and verify the reset took effect.
 
+After a reset is verified, the plugin also asks CPA's host API to clear that
+credential's core routing cooldown (`host.routing.reset_cooldown`). Redeeming a
+credit resets the upstream windows, but CPA may still hold the credential in
+cooldown until the old 429's `next_retry_after`; without this step the account
+looks recovered in the UI while every request keeps failing at the router. The
+call is best-effort: older hosts that do not expose the callback log a warning
+and the verified reset still stands.
+
 ### State Storage And Durability
 
 The plugin persists its state file (`state.json`) — the user config fields,
@@ -171,6 +179,12 @@ Open the resource page from CPA's plugin resources, or visit:
 ```text
 /v0/resource/plugins/codex-auto-reset/status
 ```
+
+The page derives its Management API root from the loaded page URL, so it also
+works when CPA is exposed under a reverse-proxy path prefix (for example
+`/cpa/v0/resource/plugins/codex-auto-reset/status` calls
+`/cpa/v0/management/plugins/codex-auto-reset/...`). Root deployments yield an
+empty prefix and keep using `/v0/management/...`.
 
 The page follows the browser language by default and can be switched between
 English and Chinese manually. It provides:

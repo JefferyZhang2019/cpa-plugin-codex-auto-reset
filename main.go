@@ -67,17 +67,17 @@ import (
 )
 
 var (
-	hostAPI       atomic.Pointer[C.cliproxy_host_api]
-	pluginStateMu sync.Mutex
-	globalState   = &PluginState{Accounts: map[string]AccountRuntime{}}
-	globalWorker  *Worker
+	hostAPI        atomic.Pointer[C.cliproxy_host_api]
+	pluginStateMu  sync.Mutex
+	globalState    = &PluginState{Accounts: map[string]AccountRuntime{}}
+	globalWorker   *Worker
 	globalHandlers *managementHandlers
 	// globalStatePath is the state file resolved once per boot in
 	// configurePlugin (explicit state_dir > CPA auth dir > OS user-config
 	// dir). All saves go through it so reconfigure cannot split state
 	// across locations.
 	globalStatePath string
-	pluginVersion   = "0.1.12"
+	pluginVersion   = "0.1.13"
 )
 
 func main() {}
@@ -350,25 +350,8 @@ func configurePlugin(raw []byte) error {
 	// resumes mid-cycle. Debounce persistence: only write to disk at most every
 	// stateSyncPersistInterval to avoid hammering the file on tight retry loops.
 	globalWorker.StateSync = func(authID string, fsm *AccountFSM) {
-		pluginStateMu.Lock()
-		globalState.Accounts[authID] = AccountRuntime{
-			AuthID:       authID,
-			State:        fsm.State(),
-			NextWake:     fsm.NextWake(),
-			LastSnapshot: fsm.LastSnapshot(),
-		}
-		// Collect pending reset history from the FSM (set in stepVERIFYING,
-		// not cleared by Reset).
-		if rec := fsm.TakePendingHistory(); rec != nil {
-			globalState.ResetHistory = append(globalState.ResetHistory, *rec)
-			// Cap at 500 entries (FIFO).
-			if len(globalState.ResetHistory) > 500 {
-				globalState.ResetHistory = globalState.ResetHistory[len(globalState.ResetHistory)-500:]
-			}
-		}
-		// Also sync logs to the persisted state.
-		globalState.Logs = globalWorker.Logs().all()
-		pluginStateMu.Unlock()
+		rec := syncFSMIntoGlobalState(globalWorker.Logs(), authID, fsm)
+		afterVerifiedReset(globalWorker.Logs(), authID, rec)
 		debouncedSaveState(statePath)
 	}
 	go globalWorker.Run()
@@ -404,21 +387,8 @@ func restartWorkerFromState() {
 		w.Logs().load(globalState.Logs)
 	}
 	w.StateSync = func(authID string, fsm *AccountFSM) {
-		pluginStateMu.Lock()
-		globalState.Accounts[authID] = AccountRuntime{
-			AuthID:       authID,
-			State:        fsm.State(),
-			NextWake:     fsm.NextWake(),
-			LastSnapshot: fsm.LastSnapshot(),
-		}
-		if rec := fsm.TakePendingHistory(); rec != nil {
-			globalState.ResetHistory = append(globalState.ResetHistory, *rec)
-			if len(globalState.ResetHistory) > 500 {
-				globalState.ResetHistory = globalState.ResetHistory[len(globalState.ResetHistory)-500:]
-			}
-		}
-		globalState.Logs = w.Logs().all()
-		pluginStateMu.Unlock()
+		rec := syncFSMIntoGlobalState(w.Logs(), authID, fsm)
+		afterVerifiedReset(w.Logs(), authID, rec)
 		if globalStatePath == "" {
 			globalStatePath = defaultStatePath() // defensive: never expected
 		}
@@ -429,6 +399,73 @@ func restartWorkerFromState() {
 		globalHandlers.worker = w
 	}
 	go w.Run()
+}
+
+// syncFSMIntoGlobalState mirrors one FSM snapshot into the persisted state and
+// returns a pending reset-history record (if the step completed a cycle).
+// Returns the record to the caller so host-side post-reset work can run
+// outside pluginStateMu.
+func syncFSMIntoGlobalState(logs *logRing, authID string, fsm *AccountFSM) *ResetRecord {
+	pluginStateMu.Lock()
+	defer pluginStateMu.Unlock()
+	globalState.Accounts[authID] = AccountRuntime{
+		AuthID:       authID,
+		State:        fsm.State(),
+		NextWake:     fsm.NextWake(),
+		LastSnapshot: fsm.LastSnapshot(),
+	}
+	// Collect pending reset history from the FSM (set in stepVERIFYING,
+	// not cleared by Reset).
+	var rec *ResetRecord
+	if r := fsm.TakePendingHistory(); r != nil {
+		globalState.ResetHistory = append(globalState.ResetHistory, *r)
+		// Cap at 500 entries (FIFO).
+		if len(globalState.ResetHistory) > 500 {
+			globalState.ResetHistory = globalState.ResetHistory[len(globalState.ResetHistory)-500:]
+		}
+		rec = r
+	}
+	// Also sync logs to the persisted state.
+	globalState.Logs = logs.all()
+	return rec
+}
+
+// afterVerifiedReset clears CPA's own model/credential cooldown for an
+// account whose reset credit redemption was verified upstream. The plugin
+// talks to OpenAI directly, so its quota view can show fresh capacity while
+// CPA core still rejects routing until the old 429 cooldown's next_retry_after
+// (quota-scheduler issue #14). Hosts predating the v8 plugin ABI reject the
+// callback; that is logged and otherwise ignored so the reset still counts.
+func afterVerifiedReset(logs *logRing, authID string, rec *ResetRecord) {
+	if rec == nil || !rec.Success {
+		return
+	}
+	resp, err := resetRoutingCooldown(authID)
+	entry := LogEntry{Timestamp: time.Now(), Scope: authID, State: StateDONE}
+	if err != nil {
+		entry.Level = "warn"
+		entry.Message = "reset verified, but clearing CPA core cooldown failed: " + err.Error()
+	} else {
+		entry.Level = "info"
+		entry.Message = fmt.Sprintf("reset verified; cleared CPA core routing cooldown for %d model(s)", len(resp.Models))
+	}
+	logs.append(entry)
+	pluginStateMu.Lock()
+	globalState.Logs = logs.all()
+	pluginStateMu.Unlock()
+}
+
+// resetRoutingCooldown is a variable so tests can stub the host ABI.
+var resetRoutingCooldown = func(authID string) (pluginapi.HostRoutingResetCooldownResponse, error) {
+	result, err := callHostCallbackABI(pluginabi.MethodHostRoutingResetCooldown, pluginapi.HostRoutingResetCooldownRequest{AuthIndex: authID})
+	if err != nil {
+		return pluginapi.HostRoutingResetCooldownResponse{}, err
+	}
+	var resp pluginapi.HostRoutingResetCooldownResponse
+	if err := json.Unmarshal(result, &resp); err != nil {
+		return pluginapi.HostRoutingResetCooldownResponse{}, fmt.Errorf("decode host.routing.reset_cooldown result: %w", err)
+	}
+	return resp, nil
 }
 
 // listCodexAccountsForUI is the AccountLister wired into managementHandlers.
@@ -525,9 +562,23 @@ func handleManagementRequest(raw []byte) pluginapi.ManagementResponse {
 	status, body, contentType := h.handle(req.Method, req.Path, req.Headers, req.Body)
 	return pluginapi.ManagementResponse{
 		StatusCode: status,
-		Headers:    http.Header{"Content-Type": []string{contentType}},
+		Headers:    managementResponseHeaders(contentType),
 		Body:       body,
 	}
+}
+
+// managementResponseHeaders builds the response headers for a plugin route.
+// The management/resource page ships inside the binary, so a cached copy
+// keeps serving a previous release's UI (and its API assumptions) after an
+// upgrade; HTML is explicitly uncacheable.
+func managementResponseHeaders(contentType string) http.Header {
+	headers := http.Header{"Content-Type": []string{contentType}}
+	if strings.HasPrefix(contentType, "text/html") {
+		headers.Set("Cache-Control", "no-store, no-cache, must-revalidate")
+		headers.Set("Pragma", "no-cache")
+		headers.Set("Expires", "0")
+	}
+	return headers
 }
 
 func mgmtJSONResponse(status int, v any) pluginapi.ManagementResponse {

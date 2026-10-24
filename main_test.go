@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,8 +67,8 @@ func contains(s, sub string) bool {
 // time.Now() reading; the log entry uses another).
 func TestBackfillResetHistory_NoDuplicateForSameReset(t *testing.T) {
 	authID := "acct-1"
-	ts1 := time.Date(2026, 9, 20, 1, 6, 22, 123456789, time.UTC)  // history record
-	ts2 := time.Date(2026, 9, 20, 1, 6, 22, 987654321, time.UTC)  // log entry (same second, different ns)
+	ts1 := time.Date(2026, 9, 20, 1, 6, 22, 123456789, time.UTC) // history record
+	ts2 := time.Date(2026, 9, 20, 1, 6, 22, 987654321, time.UTC) // log entry (same second, different ns)
 	state := &PluginState{
 		ResetHistory: []ResetRecord{{
 			Timestamp: ts1, AuthID: authID, CreditID: "credit-A", Success: true,
@@ -172,5 +174,68 @@ func TestResolveStatePath_PlacesStateUnderAuthDir(t *testing.T) {
 	want := filepath.Join(authDir, "plugin-state", "codex-auto-reset", "state.json")
 	if got != want {
 		t.Fatalf("state not under auth dir: got %q want %q", got, want)
+	}
+}
+
+func TestManagementResponseHeaders_HTMLIsUncacheable(t *testing.T) {
+	h := managementResponseHeaders("text/html; charset=utf-8")
+	if got := h.Get("Cache-Control"); !strings.Contains(got, "no-store") {
+		t.Fatalf("Cache-Control = %q, want no-store", got)
+	}
+	if h.Get("Pragma") != "no-cache" {
+		t.Fatalf("Pragma = %q", h.Get("Pragma"))
+	}
+	jsonHeaders := managementResponseHeaders("application/json")
+	if got := jsonHeaders.Get("Cache-Control"); got != "" {
+		t.Fatalf("JSON responses should not carry HTML cache directives, got %q", got)
+	}
+}
+
+func TestAfterVerifiedReset_ClearsCoreCooldownOnlyAfterSuccess(t *testing.T) {
+	oldFn, oldState := resetRoutingCooldown, globalState
+	t.Cleanup(func() { resetRoutingCooldown = oldFn; globalState = oldState })
+	globalState = &PluginState{Accounts: map[string]AccountRuntime{}}
+
+	var calls []string
+	resetRoutingCooldown = func(authID string) (pluginapi.HostRoutingResetCooldownResponse, error) {
+		calls = append(calls, authID)
+		return pluginapi.HostRoutingResetCooldownResponse{AuthIndex: authID, Models: []string{"gpt-5"}}, nil
+	}
+
+	logs := newLogRing(10)
+	afterVerifiedReset(logs, "nil-record", nil)
+	afterVerifiedReset(logs, "failed-reset", &ResetRecord{Success: false})
+	if len(calls) != 0 {
+		t.Fatalf("core cooldown reset called for unverified resets: %v", calls)
+	}
+	afterVerifiedReset(logs, "verified", &ResetRecord{Success: true})
+	if len(calls) != 1 || calls[0] != "verified" {
+		t.Fatalf("core cooldown reset calls = %v, want [verified]", calls)
+	}
+	entries := logs.all()
+	if len(entries) != 1 || entries[0].Level != "info" {
+		t.Fatalf("expected one info log entry, got %+v", entries)
+	}
+	if !strings.Contains(entries[0].Message, "1 model") {
+		t.Fatalf("log should report cleared models: %q", entries[0].Message)
+	}
+}
+
+func TestAfterVerifiedReset_LogsWarningWhenHostDoesNotSupportIt(t *testing.T) {
+	oldFn, oldState := resetRoutingCooldown, globalState
+	t.Cleanup(func() { resetRoutingCooldown = oldFn; globalState = oldState })
+	globalState = &PluginState{Accounts: map[string]AccountRuntime{}}
+	resetRoutingCooldown = func(string) (pluginapi.HostRoutingResetCooldownResponse, error) {
+		return pluginapi.HostRoutingResetCooldownResponse{}, errors.New("unsupported host callback")
+	}
+
+	logs := newLogRing(10)
+	afterVerifiedReset(logs, "verified", &ResetRecord{Success: true})
+	entries := logs.all()
+	if len(entries) != 1 || entries[0].Level != "warn" {
+		t.Fatalf("expected one warning log entry, got %+v", entries)
+	}
+	if !strings.Contains(entries[0].Message, "cooldown") {
+		t.Fatalf("warning should mention cooldown: %q", entries[0].Message)
 	}
 }

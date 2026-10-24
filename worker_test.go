@@ -2,6 +2,7 @@ package main
 
 import (
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -486,5 +487,54 @@ func TestWorker_ManualResetPreservesActiveAttempt(t *testing.T) {
 	}
 	if rec := fsm.TakePendingHistory(); rec == nil || !rec.Success {
 		t.Fatalf("verification record=%+v", rec)
+	}
+}
+
+// TestWorker_RetriesInitialCredentialLoadFailure guards the starvation bug:
+// an account whose credentials failed to load during startup was never added
+// to the FSM map, and soonest() only looks at that map, so the account stayed
+// invisible until the next plugin restart. It must now be retried on the
+// credential backoff.
+func TestWorker_RetriesInitialCredentialLoadFailure(t *testing.T) {
+	defer resetTestClock()
+	start := time.Date(2026, 7, 19, 0, 0, 0, 0, time.UTC)
+	cfg := Config{RefreshInterval: 12 * time.Hour, TriggerLeadTime: 6 * time.Hour}
+	fc := &fakeClient{credits: map[string]*Credit{}, weeklyPct: 50}
+	var attempts int32
+	loader := func(string) (CodexCredentials, ResetClient, error) {
+		if atomic.AddInt32(&attempts, 1) == 1 {
+			return CodexCredentials{}, nil, errString("auth file not ready")
+		}
+		return CodexCredentials{AccessToken: "t"}, fc, nil
+	}
+	w := NewWorker(cfg, []string{"a"}, loader, time.Now)
+	w.testAccelerate = true
+	clock := withTestClock(w, start)
+
+	done := make(chan struct{})
+	go func() { w.Run(); close(done) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		found := false
+		w.EachFSM(func(*AccountFSM) { found = true })
+		if found {
+			break
+		}
+		if time.Now().After(deadline) {
+			w.Stop()
+			<-done
+			t.Fatalf("account never recovered after transient initial load failure (attempts=%d)", atomic.LoadInt32(&attempts))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	w.Stop()
+	<-done
+
+	if got := atomic.LoadInt32(&attempts); got < 2 {
+		t.Fatalf("credential load attempts = %d, want >= 2", got)
+	}
+	if !clock.Get().After(start.Add(credentialRetryInterval - time.Second)) {
+		t.Fatalf("worker did not wait for the credential backoff: clock=%v", clock.Get())
 	}
 }

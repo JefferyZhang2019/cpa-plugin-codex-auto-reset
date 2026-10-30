@@ -107,29 +107,55 @@ func parseDurationJSON(raw json.RawMessage) (time.Duration, error) {
 	return 0, fmt.Errorf("must be a duration string like \"12h\" or a nanosecond integer")
 }
 
-// DefaultConfig returns the spec defaults: 12h patrol, 6h lead time, no
-// accounts enabled (empty == soft-disable until the user opts accounts in).
+// allAccountsWildcard is the sole enabled_accounts entry meaning "every
+// Codex account CPA knows about, including accounts added after startup".
+// It is the default so a fresh install starts working with zero UI setup;
+// operators who want an explicit subset list the auth indexes instead.
+const allAccountsWildcard = "*"
+
+// DefaultConfig returns the spec defaults: 12h patrol, 6h lead time, all
+// accounts enabled via the wildcard. An explicitly empty list (config_yaml
+// `enabled_accounts: []` or a UI save with nothing checked) soft-disables
+// the plugin until accounts are opted back in.
 func DefaultConfig() Config {
 	return Config{
 		RefreshInterval: 12 * time.Hour,
 		TriggerLeadTime: 6 * time.Hour,
-		EnabledAccounts: nil,
+		EnabledAccounts: []string{allAccountsWildcard},
 	}
 }
 
-// parseConfigYAML parses user YAML and normalizes it. Malformed YAML returns
-// an error; missing fields fall back to defaults via normalizeConfig.
+// configEnablesAll reports whether the enabled list contains the all-accounts
+// wildcard.
+func configEnablesAll(enabled []string) bool {
+	for _, a := range enabled {
+		if a == allAccountsWildcard {
+			return true
+		}
+	}
+	return false
+}
+
+// parseConfigYAML parses user YAML and normalizes it. A config_yaml block
+// that omits enabled_accounts inherits the all-accounts wildcard default;
+// `enabled_accounts: []` is an explicit opt-out and stays empty. Malformed
+// YAML returns an error; missing fields fall back to defaults via
+// normalizeConfig.
 func parseConfigYAML(raw []byte) (Config, error) {
 	var cfg Config
 	if err := yaml.Unmarshal(raw, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse config yaml: %w", err)
+	}
+	if cfg.EnabledAccounts == nil {
+		cfg.EnabledAccounts = []string{allAccountsWildcard}
 	}
 	return normalizeConfig(cfg), nil
 }
 
 // normalizeConfig applies floors and de-dup. Intervals below 1 minute are
 // raised to 1 minute to prevent tight worker loops. Empty/duplicate account
-// IDs are dropped.
+// IDs are dropped. The all-accounts wildcard collapses over any explicit
+// entries ("*" already includes them).
 func normalizeConfig(cfg Config) Config {
 	if cfg.RefreshInterval < time.Minute {
 		cfg.RefreshInterval = 12 * time.Hour
@@ -146,6 +172,9 @@ func normalizeConfig(cfg Config) Config {
 		}
 		seen[a] = true
 		out = append(out, a)
+	}
+	if configEnablesAll(out) {
+		out = []string{allAccountsWildcard}
 	}
 	cfg.EnabledAccounts = out
 	return cfg

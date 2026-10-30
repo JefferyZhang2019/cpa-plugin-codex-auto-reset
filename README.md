@@ -162,12 +162,21 @@ The plugin reads its 3 user-tunable fields from `config_yaml`:
 ```yaml
 refresh_interval: 12h        # IDLE patrol cadence (default 12h)
 trigger_lead_time: 6h        # redeem this long before a credit expires (default 6h)
-enabled_accounts:            # subset of Codex account auth_indexes (default: none)
-  - auth_index_1
-  - auth_index_2
-state_dir: /absolute/path    # optional operator override for the state file
-                             # location (see State Storage And Durability)
+enabled_accounts:            # default: ["*"] — every Codex account CPA knows,
+  - auth_index_1             # including accounts added after startup. Replace
+  - auth_index_2             # with explicit auth_indexes to opt a subset in;
+state_dir: /absolute/path    # `enabled_accounts: []` explicitly disables all.
+                             # state_dir is an optional operator override (see
+                             # State Storage And Durability)
 ```
+
+**Fresh installs work with zero setup**: `enabled_accounts` defaults to the
+all-accounts wildcard `["*"]`, so the plugin immediately monitors every Codex
+account in CPA — no management key, no UI visit, no manual account selection.
+The wildcard is re-resolved from the host about once a minute, so accounts
+logged in later are picked up (and removed accounts dropped) automatically.
+Existing installations keep their saved `enabled_accounts` as-is after
+upgrading; only a brand-new state file gets the wildcard default.
 
 All other behavior (OpenAI endpoints, retry backoff, post-reset verify delay,
 log retention) is hardcoded and not user-configurable.
@@ -189,7 +198,10 @@ empty prefix and keep using `/v0/management/...`.
 The page follows the browser language by default and can be switched between
 English and Chinese manually. It provides:
 
-- The 3 user config fields (editable, saved via the Management key).
+- The 3 user config fields (editable, saved via the Management key). The
+  enabled-accounts section has an **All accounts (automatic)** toggle — on by
+  default for fresh installs — that covers every Codex account CPA knows,
+  including future ones; uncheck it to pick accounts individually.
 - Per-account cards showing FSM state, credits available, weekly remaining,
   and manual Check / Reset buttons.
 - A live log view (last 100 entries).

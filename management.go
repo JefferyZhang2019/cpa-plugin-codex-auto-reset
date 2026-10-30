@@ -264,15 +264,16 @@ func (h *managementHandlers) accountsJSON() (int, []byte) {
 	if err != nil {
 		return jsonStatus(http.StatusBadGateway, map[string]any{"error": "list accounts: " + err.Error()})
 	}
-	// Mark enabled ones.
+	// Mark enabled ones. In wildcard mode every listed account is enabled.
 	h.mu.Lock()
 	enabled := make(map[string]bool, len(h.state.Config.EnabledAccounts))
 	for _, id := range h.state.Config.EnabledAccounts {
 		enabled[id] = true
 	}
+	all := configEnablesAll(h.state.Config.EnabledAccounts)
 	h.mu.Unlock()
 	for i := range opts {
-		opts[i].Enabled = enabled[opts[i].AuthIndex]
+		opts[i].Enabled = all || enabled[opts[i].AuthIndex]
 	}
 	return jsonOK(map[string]any{"accounts": opts})
 }
@@ -737,6 +738,11 @@ func renderStatusHTML(state *PluginState) string {
             </label>
             <div>
               <div style="font-size:12px; font-weight:600; margin-bottom:6px;" data-i18n="enabledAccounts">Enabled accounts</div>
+              <label class="acct-item" style="font-weight:700; background: var(--surface-2);">
+                <input type="checkbox" id="allAccountsToggle">
+                <span data-i18n="allAccounts">All accounts (automatic)</span>
+              </label>
+              <p class="setting-help" data-i18n="allAccountsHelp">Includes every Codex account CPA knows, now and in the future. Uncheck to pick accounts individually.</p>
               <div id="accountCheckboxes" class="acct-list">
                 <span class="muted" data-i18n="loadAccountsPrompt">Click "Load status" to list accounts.</span>
               </div>
@@ -776,6 +782,8 @@ func renderStatusHTML(state *PluginState) string {
         refreshInterval: "Refresh interval",
         triggerLeadTime: "Trigger lead time",
         enabledAccounts: "Enabled accounts",
+        allAccounts: "All accounts (automatic)",
+        allAccountsHelp: "Includes every Codex account CPA knows, now and in the future. Uncheck to pick accounts individually.",
         save: "Save settings",
         loadPrompt: "Enter the CPA management key and click Load status.",
         loadAccountsPrompt: "Click \"Load status\" to list accounts.",
@@ -815,6 +823,8 @@ func renderStatusHTML(state *PluginState) string {
         refreshInterval: "\u5237\u65b0\u95f4\u9694",
         triggerLeadTime: "\u63d0\u524d\u89e6\u53d1\u65f6\u95f4",
         enabledAccounts: "\u542f\u7528\u7684\u8d26\u53f7",
+        allAccounts: "\u5168\u90e8\u8d26\u53f7\uff08\u81ea\u52a8\uff09",
+        allAccountsHelp: "\u81ea\u52a8\u5305\u542b CPA \u4e2d\u7684\u6240\u6709 Codex \u8d26\u53f7\uff08\u542b\u65e5\u540e\u65b0\u589e\uff09\u3002\u53d6\u6d88\u52fe\u9009\u53ef\u624b\u52a8\u9009\u62e9\u8d26\u53f7\u3002",
         loadAccountsPrompt: "\u70b9\u51fb\u201c\u52a0\u8f7d\u72b6\u6001\u201d\u4ee5\u5217\u51fa\u8d26\u53f7\u3002",
         noAccountsFound: "\u672a\u5728 CPA \u4e2d\u627e\u5230 Codex \u8d26\u53f7\u3002",
         save: "\u4fdd\u5b58\u8bbe\u7f6e",
@@ -1264,25 +1274,38 @@ func renderStatusHTML(state *PluginState) string {
         const c = status.config || {};
         document.getElementById('refreshInterval').value = (c.refresh_interval || '').toString();
         document.getElementById('triggerLeadTime').value = (c.trigger_lead_time || '').toString();
-        renderAccountCheckboxes(acctsResp.accounts || []);
+        currentAccounts = acctsResp.accounts || [];
+        allAccountsMode = (c.enabled_accounts || []).indexOf('*') !== -1;
+        renderAccountCheckboxes(currentAccounts);
       } catch (e) { alert(e.message); }
     }
+    // currentAccounts caches the last /accounts result and allAccountsMode the
+    // wildcard state from config, so the "All accounts" toggle can re-render
+    // the checkbox list without a round-trip.
+    var currentAccounts = [];
+    var allAccountsMode = false;
     function renderAccountCheckboxes(accts) {
       var box = document.getElementById('accountCheckboxes');
+      var toggle = document.getElementById('allAccountsToggle');
+      toggle.checked = allAccountsMode;
       if (!accts || accts.length === 0) {
         box.innerHTML = '<span class="muted">' + escapeHTML(t('noAccountsFound')) + '</span>';
         return;
       }
       box.innerHTML = accts.map(function (a) {
-        var checked = a.enabled ? ' checked' : '';
+        // In wildcard mode every account is covered; the individual boxes are
+        // shown checked+disabled as a preview and saved as ["*"].
+        var checked = allAccountsMode || a.enabled ? ' checked' : '';
+        var disabled = allAccountsMode ? ' disabled' : '';
         // a.name is already the most informative label (ID/file name preferred).
         var label = escapeHTML(a.name || a.email || a.auth_index);
         return '<label class="acct-item">' +
-               '<input type="checkbox" class="acct-checkbox" value="' + escapeHTML(a.auth_index) + '"' + checked + '>' +
+               '<input type="checkbox" class="acct-checkbox" value="' + escapeHTML(a.auth_index) + '"' + checked + disabled + '>' +
                '<span>' + label + '</span></label>';
       }).join('');
     }
     function getEnabledAccounts() {
+      if (document.getElementById('allAccountsToggle').checked) return ['*'];
       return Array.prototype.slice.call(document.querySelectorAll('.acct-checkbox:checked'))
         .map(function (cb) { return cb.value; });
     }
@@ -1370,6 +1393,12 @@ func renderStatusHTML(state *PluginState) string {
       document.getElementById('refresh').addEventListener('click', loadStatus);
       document.getElementById('load').addEventListener('click', function () { syncRememberedKey(); loadStatus(); });
       document.getElementById('saveSettings').addEventListener('click', saveSettings);
+      // "All accounts" toggle: switching it re-renders the account checkboxes
+      // between wildcard preview (all checked, disabled) and per-account picks.
+      document.getElementById('allAccountsToggle').addEventListener('change', function () {
+        allAccountsMode = this.checked;
+        renderAccountCheckboxes(currentAccounts);
+      });
       // Remember-management-key: checkbox persists the key in localStorage
       // (unencrypted, this-browser-only). Mirrors the quota-scheduler plugin.
       document.getElementById('rememberManagementKey').addEventListener('change', syncRememberedKey);

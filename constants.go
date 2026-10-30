@@ -28,6 +28,11 @@ const (
 	// left the account out of the FSM map forever, and a failure while running
 	// waited a full refresh_interval (default 12h).
 	credentialRetryInterval = 30 * time.Minute
+	// wildcardResolveInterval throttles how often the worker re-queries the
+	// host for the Codex account set while the all-accounts wildcard ("*") is
+	// enabled. Without it the idle loop (100ms ticks when nothing is
+	// scheduled) would hammer the host ABI.
+	wildcardResolveInterval = 1 * time.Minute
 )
 
 var resetRetryDelays = []time.Duration{

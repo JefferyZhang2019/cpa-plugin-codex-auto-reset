@@ -77,7 +77,7 @@ var (
 	// dir). All saves go through it so reconfigure cannot split state
 	// across locations.
 	globalStatePath string
-	pluginVersion   = "0.1.13"
+	pluginVersion   = "0.2.0"
 )
 
 func main() {}
@@ -320,6 +320,7 @@ func configurePlugin(raw []byte) error {
 	}
 	enabled := cfg.EnabledAccounts
 	globalWorker = NewWorker(cfg, enabled, hostCredsLoader, time.Now)
+	globalWorker.AccountEnumerator = listCodexAuthIndexes
 	// Always announce the state location and load source — on FIRST load too,
 	// not just reconfigure — so operators know what to back up / volume-mount.
 	loadLevel := "info"
@@ -380,6 +381,7 @@ func restartWorkerFromState() {
 	}
 	cfg := globalState.Config
 	w := NewWorker(cfg, cfg.EnabledAccounts, hostCredsLoader, time.Now)
+	w.AccountEnumerator = listCodexAuthIndexes
 	// Carry over existing logs so a settings-change restart doesn't lose them.
 	if globalWorker != nil {
 		w.Logs().load(globalWorker.Logs().all())
@@ -510,6 +512,20 @@ func listCodexAccountsForUI() ([]AccountOption, error) {
 	}
 	sort.Slice(opts, func(i, j int) bool { return opts[i].Name < opts[j].Name })
 	return opts, nil
+}
+
+// listCodexAuthIndexes is the worker's AccountEnumerator: the Codex auth
+// indexes the host currently knows, for the all-accounts wildcard ("*").
+func listCodexAuthIndexes() ([]string, error) {
+	opts, err := listCodexAccountsForUI()
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(opts))
+	for _, o := range opts {
+		ids = append(ids, o.AuthIndex)
+	}
+	return ids, nil
 }
 
 func pluginRegistration() registration {

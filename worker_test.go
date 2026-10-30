@@ -538,3 +538,163 @@ func TestWorker_RetriesInitialCredentialLoadFailure(t *testing.T) {
 		t.Fatalf("worker did not wait for the credential backoff: clock=%v", clock.Get())
 	}
 }
+
+// wildcardTestHelper bundles the knobs the wildcard tests manipulate. All
+// access happens from the test goroutine only (no Run loop started), so no
+// extra synchronization is needed beyond the worker's own mutex.
+func wildcardFsmCount(w *Worker) int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.fsms)
+}
+
+func wildcardResetThrottle(w *Worker) {
+	w.mu.Lock()
+	w.lastResolveAt = time.Time{}
+	w.mu.Unlock()
+}
+
+// TestWorker_WildcardResolvesAndReapsAccounts covers the wildcard ("*")
+// lifecycle: the effective set starts empty, a host enumeration creates FSMs,
+// later enumerations add new accounts and reap IDLE FSMs whose account
+// vanished, and the throttle keeps the host from being re-queried.
+func TestWorker_WildcardResolvesAndReapsAccounts(t *testing.T) {
+	cfg := Config{RefreshInterval: 6 * time.Hour, TriggerLeadTime: 6 * time.Hour}
+	fc := &fakeClient{credits: map[string]*Credit{}, weeklyPct: 50}
+	loader := func(string) (CodexCredentials, ResetClient, error) {
+		return CodexCredentials{AccessToken: "t"}, fc, nil
+	}
+	w := NewWorker(cfg, []string{allAccountsWildcard}, loader, time.Now)
+
+	// Wildcard is not an account: nothing is serviced before the first resolve.
+	if got := wildcardFsmCount(w); got != 0 {
+		t.Fatalf("FSMs before first resolve = %d, want 0", got)
+	}
+
+	current := []string{"a", "b"}
+	var enumCalls int32
+	w.AccountEnumerator = func() ([]string, error) {
+		atomic.AddInt32(&enumCalls, 1)
+		return current, nil
+	}
+
+	w.maybeResolveWildcard()
+	w.retryMissingFSMs()
+	if got := wildcardFsmCount(w); got != 2 {
+		t.Fatalf("FSMs after first resolve = %d, want 2", got)
+	}
+
+	// Account added after startup: next resolve picks it up.
+	current = []string{"a", "b", "c"}
+	wildcardResetThrottle(w)
+	w.maybeResolveWildcard()
+	w.retryMissingFSMs()
+	if got := wildcardFsmCount(w); got != 3 {
+		t.Fatalf("FSMs after new account = %d, want 3", got)
+	}
+
+	// Account removed: its IDLE FSM is reaped; the others survive.
+	current = []string{"a"}
+	wildcardResetThrottle(w)
+	w.maybeResolveWildcard()
+	if got := wildcardFsmCount(w); got != 1 {
+		t.Fatalf("FSMs after removal = %d, want 1", got)
+	}
+	w.EachFSM(func(f *AccountFSM) {
+		if f.AuthID != "a" {
+			t.Fatalf("surviving FSM = %q, want %q", f.AuthID, "a")
+		}
+	})
+
+	// Throttle: an immediate re-resolve must not hit the host again.
+	before := atomic.LoadInt32(&enumCalls)
+	w.maybeResolveWildcard()
+	if got := atomic.LoadInt32(&enumCalls); got != before {
+		t.Fatalf("throttled resolve still queried the host: %d -> %d", before, got)
+	}
+}
+
+// TestWorker_WildcardEnumerationFailureKeepsPreviousSet: a failing host query
+// must keep the previously resolved set (and its FSMs) instead of wiping it.
+func TestWorker_WildcardEnumerationFailureKeepsPreviousSet(t *testing.T) {
+	cfg := Config{RefreshInterval: 6 * time.Hour, TriggerLeadTime: 6 * time.Hour}
+	fc := &fakeClient{credits: map[string]*Credit{}, weeklyPct: 50}
+	loader := func(string) (CodexCredentials, ResetClient, error) {
+		return CodexCredentials{AccessToken: "t"}, fc, nil
+	}
+	w := NewWorker(cfg, []string{allAccountsWildcard}, loader, time.Now)
+	failing := false
+	w.AccountEnumerator = func() ([]string, error) {
+		if failing {
+			return nil, errString("host unavailable")
+		}
+		return []string{"a", "b"}, nil
+	}
+
+	w.maybeResolveWildcard()
+	w.retryMissingFSMs()
+	if got := wildcardFsmCount(w); got != 2 {
+		t.Fatalf("FSMs after first resolve = %d, want 2", got)
+	}
+
+	failing = true
+	wildcardResetThrottle(w)
+	w.maybeResolveWildcard()
+	if got := wildcardFsmCount(w); got != 2 {
+		t.Fatalf("FSMs after failed resolve = %d, want 2 (previous set kept)", got)
+	}
+	w.mu.Lock()
+	resolved := append([]string(nil), w.resolvedEnabled...)
+	w.mu.Unlock()
+	if len(resolved) != 2 {
+		t.Fatalf("resolved set after failure = %v, want previous [a b]", resolved)
+	}
+}
+
+// TestWorker_StaticModeNeverCallsEnumerator: without the wildcard the static
+// configured list is used verbatim and the host is never queried.
+func TestWorker_StaticModeNeverCallsEnumerator(t *testing.T) {
+	cfg := Config{RefreshInterval: 6 * time.Hour, TriggerLeadTime: 6 * time.Hour}
+	fc := &fakeClient{credits: map[string]*Credit{}, weeklyPct: 50}
+	loader := func(string) (CodexCredentials, ResetClient, error) {
+		return CodexCredentials{AccessToken: "t"}, fc, nil
+	}
+	w := NewWorker(cfg, []string{"a"}, loader, time.Now)
+	w.AccountEnumerator = func() ([]string, error) {
+		t.Fatal("enumerator must not be called without the wildcard")
+		return nil, nil
+	}
+	w.maybeResolveWildcard()
+	w.retryMissingFSMs()
+	if got := wildcardFsmCount(w); got != 1 {
+		t.Fatalf("FSMs in static mode = %d, want 1", got)
+	}
+}
+
+// TestWorker_WildcardResolveHonorsCredentialBackoff: an account whose
+// credentials fail to load enters the credential backoff; a wildcard
+// re-resolve must NOT bypass it with an immediate retry (otherwise a broken
+// account would be hammered — and logged about — once per resolve interval).
+func TestWorker_WildcardResolveHonorsCredentialBackoff(t *testing.T) {
+	cfg := Config{RefreshInterval: 6 * time.Hour, TriggerLeadTime: 6 * time.Hour}
+	var attempts int32
+	loader := func(string) (CodexCredentials, ResetClient, error) {
+		atomic.AddInt32(&attempts, 1)
+		return CodexCredentials{}, nil, errString("boom")
+	}
+	w := NewWorker(cfg, []string{allAccountsWildcard}, loader, time.Now)
+	w.AccountEnumerator = func() ([]string, error) { return []string{"a"}, nil }
+
+	w.maybeResolveWildcard()
+	w.retryMissingFSMs() // first attempt fails -> backoff recorded
+	if first := atomic.LoadInt32(&attempts); first != 1 {
+		t.Fatalf("attempts after first pass = %d, want 1", first)
+	}
+
+	wildcardResetThrottle(w)
+	w.maybeResolveWildcard()
+	w.retryMissingFSMs() // backoff must suppress the retry
+	if got := atomic.LoadInt32(&attempts); got != 1 {
+		t.Fatalf("wildcard resolve bypassed credential backoff: 1 -> %d", got)
+	}
+}

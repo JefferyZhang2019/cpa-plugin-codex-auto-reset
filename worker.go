@@ -12,6 +12,13 @@ import (
 // refreshes (spec §6.2).
 type CredsLoader func(authID string) (CodexCredentials, ResetClient, error)
 
+// AccountEnumerator returns the Codex auth indexes the host currently knows
+// about. The worker queries it periodically while the enabled list contains
+// the all-accounts wildcard ("*"), so accounts added or removed after startup
+// are picked up without a settings save or plugin reload. Nil keeps the
+// static configured list.
+type AccountEnumerator func() ([]string, error)
+
 // Worker drives one AccountFSM per enabled account from a single goroutine.
 // It picks the soonest nextWake across accounts, sleeps until then, steps
 // that account, and recomputes. Manual triggers (TriggerCheck, ForceConfirm)
@@ -28,6 +35,11 @@ type Worker struct {
 	enabled []string
 	loader  CredsLoader
 	nowFn   func() time.Time
+
+	// AccountEnumerator, when non-nil AND the enabled list contains the
+	// wildcard, is polled at wildcardResolveInterval to refresh the effective
+	// account set (see AccountEnumerator).
+	AccountEnumerator AccountEnumerator
 
 	// StateSync, if non-nil, is called after every FSM step so the caller
 	// (main.go's configurePlugin) can mirror FSM state into the persisted
@@ -47,6 +59,12 @@ type Worker struct {
 	// initial load is never added to fsms and soonest() skips it forever.
 	missingRetryAt map[string]time.Time
 
+	// resolvedEnabled is the effective account set the loop services: the
+	// configured list verbatim, or — in wildcard mode — the latest host
+	// enumeration. lastResolveAt throttles wildcard re-queries.
+	resolvedEnabled []string
+	lastResolveAt   time.Time
+
 	// testAccelerate, when true, makes Run advance the injected clock to the
 	// next wake time instead of sleeping in real time. Lets tests run a full
 	// multi-day FSM cycle in milliseconds. Production leaves this false.
@@ -57,8 +75,16 @@ func NewWorker(cfg Config, enabled []string, loader CredsLoader, nowFn func() ti
 	if nowFn == nil {
 		nowFn = time.Now
 	}
+	static := append([]string(nil), enabled...)
+	if configEnablesAll(static) {
+		// The wildcard is not an account: the effective set starts empty and
+		// is populated by maybeResolveWildcard's first host query (immediate
+		// on the first Run tick). An unwired enumerator therefore idles the
+		// worker rather than looping on a bogus "*" credential load.
+		static = nil
+	}
 	return &Worker{
-		cfg: cfg, enabled: enabled, loader: loader, nowFn: nowFn,
+		cfg: cfg, enabled: enabled, resolvedEnabled: static, loader: loader, nowFn: nowFn,
 		fsms: map[string]*AccountFSM{}, missingRetryAt: map[string]time.Time{},
 		logs:   newLogRing(maxLogEntries),
 		stopCh: make(chan struct{}), wakeCh: make(chan struct{}, 1),
@@ -192,7 +218,7 @@ func (w *Worker) Run() {
 	}()
 
 	// ensureFSM takes the worker mutex itself, so don't hold it here.
-	for _, id := range w.enabled {
+	for _, id := range w.resolvedEnabled {
 		w.ensureFSM(id)
 	}
 
@@ -202,6 +228,10 @@ func (w *Worker) Run() {
 			return
 		default:
 		}
+		// Wildcard mode: refresh the effective account set from the host
+		// (throttled), so newly added accounts start being serviced and
+		// removed ones are dropped.
+		w.maybeResolveWildcard()
 		// Accounts whose credentials failed to load are not in fsms and would
 		// otherwise be invisible to soonest() forever. Retry them on the
 		// credential backoff (and immediately if the backoff has elapsed).
@@ -326,13 +356,73 @@ func (w *Worker) ensureFSM(id string) {
 	w.mu.Unlock()
 }
 
+// maybeResolveWildcard refreshes the effective account set when the enabled
+// list contains the all-accounts wildcard. The host is queried at most once
+// per wildcardResolveInterval (the idle loop ticks at 100ms when nothing is
+// scheduled, so the throttle is what keeps the host ABI quiet). Enumeration
+// failures keep the previous set and log a warning. On success, new accounts
+// are picked up by retryMissingFSMs on the next loop tick (honoring the
+// credential backoff), and IDLE FSMs whose account vanished are reaped (an
+// active cycle finishes first and is reaped by a later pass).
+func (w *Worker) maybeResolveWildcard() {
+	w.mu.Lock()
+	if !configEnablesAll(w.enabled) || w.AccountEnumerator == nil {
+		w.mu.Unlock()
+		return
+	}
+	now := w.nowFn()
+	if !w.lastResolveAt.IsZero() && now.Sub(w.lastResolveAt) < wildcardResolveInterval {
+		w.mu.Unlock()
+		return
+	}
+	w.lastResolveAt = now
+	w.mu.Unlock()
+
+	ids, err := w.AccountEnumerator()
+	if err != nil {
+		w.logs.append(LogEntry{
+			Timestamp: w.nowFn(), Level: "warn", Scope: "system",
+			Message: "wildcard account enumeration failed (keeping previous set): " + err.Error(),
+		})
+		return
+	}
+	sort.Strings(ids)
+
+	w.mu.Lock()
+	w.resolvedEnabled = ids
+	present := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		present[id] = true
+	}
+	for id, fsm := range w.fsms {
+		if present[id] || fsm.State() != StateIDLE {
+			continue // vanished account mid-cycle: let the cycle finish
+		}
+		delete(w.fsms, id)
+		delete(w.missingRetryAt, id)
+		w.logs.append(LogEntry{
+			Timestamp: w.nowFn(), Level: "info", Scope: id,
+			Message: "account no longer present in CPA; wildcard monitoring stopped",
+		})
+	}
+	for id := range w.missingRetryAt {
+		if !present[id] {
+			delete(w.missingRetryAt, id)
+		}
+	}
+	w.mu.Unlock()
+	// FSM creation is left to retryMissingFSMs (next loop tick): it honors the
+	// credential backoff, and an account with no backoff record — including a
+	// newly appeared one — is ensured immediately.
+}
+
 // retryMissingFSMs re-attempts credential loads for enabled accounts that are
 // absent from fsms once their backoff has elapsed. Called by Run each loop.
 func (w *Worker) retryMissingFSMs() {
 	w.mu.Lock()
 	now := w.nowFn()
 	var retry []string
-	for _, id := range w.enabled {
+	for _, id := range w.resolvedEnabled {
 		if _, ok := w.fsms[id]; ok {
 			continue
 		}
@@ -354,7 +444,7 @@ func (w *Worker) nextMissingRetryDelay() time.Duration {
 	defer w.mu.Unlock()
 	now := w.nowFn()
 	var soonest time.Time
-	for _, id := range w.enabled {
+	for _, id := range w.resolvedEnabled {
 		if _, ok := w.fsms[id]; ok {
 			continue
 		}

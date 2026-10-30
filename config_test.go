@@ -15,8 +15,9 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.TriggerLeadTime != 6*time.Hour {
 		t.Fatalf("L = %v", cfg.TriggerLeadTime)
 	}
-	if len(cfg.EnabledAccounts) != 0 {
-		t.Fatalf("enabled = %v", cfg.EnabledAccounts)
+	// Fresh installs enable every Codex account via the wildcard.
+	if len(cfg.EnabledAccounts) != 1 || cfg.EnabledAccounts[0] != allAccountsWildcard {
+		t.Fatalf("enabled = %v, want [%q]", cfg.EnabledAccounts, allAccountsWildcard)
 	}
 }
 
@@ -43,9 +44,40 @@ func TestParseConfigYAML_Empty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse empty: %v", err)
 	}
-	// Empty YAML should yield defaults (normalization kicks in).
+	// Empty YAML should yield defaults (normalization kicks in), including
+	// the all-accounts wildcard for a fresh install.
 	if cfg.RefreshInterval != 12*time.Hour {
 		t.Fatalf("empty R should default, got %v", cfg.RefreshInterval)
+	}
+	if !configEnablesAll(cfg.EnabledAccounts) {
+		t.Fatalf("empty yaml enabled = %v, want wildcard", cfg.EnabledAccounts)
+	}
+}
+
+// TestParseConfigYAML_ExplicitEmptyOptsOut verifies `enabled_accounts: []`
+// is honored as a deliberate opt-out rather than inheriting the wildcard
+// default (which only applies when the field is absent).
+func TestParseConfigYAML_ExplicitEmptyOptsOut(t *testing.T) {
+	cfg, err := parseConfigYAML([]byte("enabled_accounts: []\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cfg.EnabledAccounts == nil || len(cfg.EnabledAccounts) != 0 {
+		t.Fatalf("enabled = %#v, want explicit empty slice", cfg.EnabledAccounts)
+	}
+}
+
+// TestNormalizeConfig_WildcardCollapsesExplicitEntries: "*" already includes
+// every account, so mixing it with explicit indexes collapses to ["*"].
+func TestNormalizeConfig_WildcardCollapsesExplicitEntries(t *testing.T) {
+	cfg := Config{
+		RefreshInterval: 12 * time.Hour,
+		TriggerLeadTime: 6 * time.Hour,
+		EnabledAccounts: []string{"*", "  ", "a", "*"},
+	}
+	cfg = normalizeConfig(cfg)
+	if len(cfg.EnabledAccounts) != 1 || cfg.EnabledAccounts[0] != allAccountsWildcard {
+		t.Fatalf("enabled = %v, want [%q]", cfg.EnabledAccounts, allAccountsWildcard)
 	}
 }
 
@@ -128,5 +160,19 @@ func TestConfig_UnmarshalJSON_AcceptsStringAndNanoseconds(t *testing.T) {
 				t.Fatalf("RefreshInterval = %v, want %v", c.RefreshInterval, tc.want)
 			}
 		})
+	}
+}
+
+// TestParseConfigYAML_CpaEnableBlockOnlyDefaultsToWildcard: a fresh install's
+// config_yaml is just CPA's enable block (`enabled: true`, maybe `priority`);
+// enabled_accounts is absent and must inherit the all-accounts wildcard so
+// the plugin works immediately with zero UI setup.
+func TestParseConfigYAML_CpaEnableBlockOnlyDefaultsToWildcard(t *testing.T) {
+	cfg, err := parseConfigYAML([]byte("enabled: true\npriority: 1\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !configEnablesAll(cfg.EnabledAccounts) {
+		t.Fatalf("enabled = %v, want wildcard default", cfg.EnabledAccounts)
 	}
 }

@@ -269,3 +269,83 @@ func TestAccountsRoute_NoListerReturns503(t *testing.T) {
 		t.Fatalf("status = %d, want 503", status)
 	}
 }
+
+// TestAccountsRoute_WildcardMarksAllEnabled: in wildcard mode every listed
+// account reports Enabled=true (the UI shows them checked under the toggle).
+func TestAccountsRoute_WildcardMarksAllEnabled(t *testing.T) {
+	srv := newTestManagement(t, Config{
+		RefreshInterval: 12 * time.Hour,
+		TriggerLeadTime: 6 * time.Hour,
+		EnabledAccounts: []string{allAccountsWildcard},
+	}, nil)
+	srv.h.lister = func() ([]AccountOption, error) {
+		return []AccountOption{
+			{AuthIndex: "idx-a", Name: "a.json"},
+			{AuthIndex: "idx-b", Name: "b.json"},
+		}, nil
+	}
+	body := srv.get(t, "/v0/management/plugins/codex-auto-reset/accounts")
+	var resp struct {
+		Accounts []AccountOption `json:"accounts"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("unmarshal: %v (body=%s)", err, body)
+	}
+	if len(resp.Accounts) != 2 {
+		t.Fatalf("got %d accounts, want 2", len(resp.Accounts))
+	}
+	for _, a := range resp.Accounts {
+		if !a.Enabled {
+			t.Fatalf("account %q should be enabled in wildcard mode", a.AuthIndex)
+		}
+	}
+}
+
+// TestPutSettings_AcceptsWildcardAndPersists: the UI's "All accounts" toggle
+// saves ["*"]; a mix of wildcard + explicit entries collapses to ["*"].
+func TestPutSettings_AcceptsWildcardAndPersists(t *testing.T) {
+	srv := newTestManagement(t, DefaultConfig(), nil)
+	body := srv.put(t, "/v0/management/plugins/codex-auto-reset/settings",
+		[]byte(`{"refresh_interval":"12h","trigger_lead_time":"6h","enabled_accounts":["*","idx-a"]}`))
+	var resp struct {
+		EnabledAccounts []string `json:"enabled_accounts"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("unmarshal: %v (body=%s)", err, body)
+	}
+	if len(resp.EnabledAccounts) != 1 || resp.EnabledAccounts[0] != allAccountsWildcard {
+		t.Fatalf("enabled = %v, want [%q]", resp.EnabledAccounts, allAccountsWildcard)
+	}
+	loaded, _, err := loadState(srv.h.statePath)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if !configEnablesAll(loaded.Config.EnabledAccounts) {
+		t.Fatalf("persisted enabled = %v, want wildcard", loaded.Config.EnabledAccounts)
+	}
+}
+
+// TestPutSettings_EmptyListStillOptsOut: saving with nothing checked (toggle
+// off, no accounts) must remain an explicit empty list — it must NOT fall
+// back to the wildcard default.
+func TestPutSettings_EmptyListStillOptsOut(t *testing.T) {
+	srv := newTestManagement(t, DefaultConfig(), nil)
+	body := srv.put(t, "/v0/management/plugins/codex-auto-reset/settings",
+		[]byte(`{"refresh_interval":"12h","trigger_lead_time":"6h","enabled_accounts":[]}`))
+	var resp struct {
+		EnabledAccounts []string `json:"enabled_accounts"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("unmarshal: %v (body=%s)", err, body)
+	}
+	if len(resp.EnabledAccounts) != 0 {
+		t.Fatalf("enabled = %v, want empty", resp.EnabledAccounts)
+	}
+	loaded, _, err := loadState(srv.h.statePath)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if configEnablesAll(loaded.Config.EnabledAccounts) || len(loaded.Config.EnabledAccounts) != 0 {
+		t.Fatalf("persisted enabled = %v, want explicit empty", loaded.Config.EnabledAccounts)
+	}
+}
